@@ -12,7 +12,7 @@
 
 
 # Install dependencies
-# get_ipython().system('pip install yfinance hmmlearn pandas numpy scikit-learn ta feedparser nltk beautifulsoup4 requests joblib matplotlib')
+
 import nltk
 nltk.download('vader_lexicon')
 
