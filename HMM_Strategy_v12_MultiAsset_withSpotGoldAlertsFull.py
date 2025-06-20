@@ -34,7 +34,7 @@ import joblib
 import matplotlib.pyplot as plt
 
 # Telegram config
-BOT_TOKEN = "***REMOVED***"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID   = "1669179604"
 BASE_URL  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
