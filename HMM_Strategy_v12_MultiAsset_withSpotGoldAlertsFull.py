@@ -32,6 +32,7 @@ from bs4 import BeautifulSoup
 import requests
 import joblib
 import matplotlib.pyplot as plt
+import os
 
 # Telegram config
 BOT_TOKEN = os.environ["BOT_TOKEN"]
