@@ -29,9 +29,9 @@ jobs:
           EOF
 
       - name: Run bot
+        run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:   ${{ secrets.CHAT_ID }}
-        run: |
-          python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
+      
 
