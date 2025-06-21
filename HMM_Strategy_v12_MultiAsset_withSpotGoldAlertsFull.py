@@ -1,17 +1,11 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# 
-# # 📊 HMM Strategy v12: Multi-Asset (Spot Gold) & Two-Signal Mapping
-# 
-# This notebook trains the v12 HMM strategy for SPY, TSLA, BYD (1211.HK), Spot Gold (GC=F), and DBS (D05.SI),
-# and sends Telegram alerts via HTTP API, with full feature recomputation.
-# 
+#
+# 📊 HMM Strategy v12: Multi-Asset (Spot Gold) & Two-Signal Mapping
+#
 
 # In[1]:
-
-
-# Install dependencies
 
 import nltk
 nltk.download('vader_lexicon')
@@ -44,7 +38,6 @@ else:
     last_state = None
 # ──────────────────────────────────────────────────────────────────────
 
-
 # Telegram config
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID   = "1669179604"
@@ -65,7 +58,6 @@ sia = SentimentIntensityAnalyzer()
 
 
 # In[3]:
-
 
 results = {}
 for name, ticker in assets.items():
@@ -147,7 +139,6 @@ for name, ticker in assets.items():
 
 # In[4]:
 
-
 # Send Telegram alerts with a 60-day lookback
 LOOKBACK = 60
 for name, ticker in assets.items():
@@ -198,13 +189,8 @@ for name, ticker in assets.items():
         continue
 
     tail = df2.iloc[-2:]
-    prev_s, curr_s = model.predict(scaler.transform(tail[features]))[-2:]
-    
-    # ─── Only send if regime changed ─────────────────────────────────────
-    if curr_s == last_state:
-        print(f"{ticker}: no change (still state {curr_s}); skipping send.")
-        continue
-    # ─────────────────────────────────────────────────────────────────────
+    X2 = scaler.transform(tail[features].values)
+    prev_s, curr_s = model.predict(X2)[-2:]
 
     signal = "✅ ENTER / BUY" if curr_s in pos_states else "🚫 EXIT / SELL"
     price = tail[close_col].iloc[-1]
@@ -217,12 +203,14 @@ for name, ticker in assets.items():
     requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
     print(f"{ticker}: {signal}")
 
-    # ─── Record that we just messaged for this state ────────────────────
-    STATE_FILE.write_text(json.dumps({"state": curr_s}))
-    # ────────────────────────────────────────────────────────────────────
-
+    # ─── Persist the last sent state (cast to int!) ──────────────────
+    STATE_FILE.write_text(json.dumps({"state": int(curr_s)}))
+    # ─────────────────────────────────────────────────────────────────
 
 # In[ ]:
+
+
+
 
 
 
