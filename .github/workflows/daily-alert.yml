@@ -32,7 +32,6 @@ jobs:
         run: |
           printf '%s' "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp-key.json
 
-      # 👀 DEBUG: Print GCP JSON file contents (REMOVE after troubleshooting!)
       - name: DEBUG: Print GCP JSON file contents
         run: |
           echo "----START OF gcp-key.json----"
