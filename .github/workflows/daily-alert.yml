@@ -28,14 +28,17 @@ jobs:
           nltk.download('vader_lexicon')
           EOF
 
+      # Export GCP Service Account JSON (use printf, not echo!)
       - name: Export GCP Service Account JSON
-        shell: bash
         run: |
           printf '%s' "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp-key.json
+        shell: bash
 
+      # Validate the GCP JSON
       - name: Validate GCP JSON (safe)
         run: |
           python -c "import json; json.load(open('/tmp/gcp-key.json'))" && echo 'GCP JSON is valid'
+
 
       - name: Run bot
         run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
