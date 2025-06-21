@@ -167,6 +167,7 @@ for name, ticker in assets.items():
     if isinstance(df2.columns, pd.MultiIndex):
         df2.columns = [' '.join(c).strip() for c in df2.columns.values]
     if len(df2) < LOOKBACK//2:
+        print(f"{ticker}: Insufficient data for alert.")
         continue
 
     # recompute features on df2 (news, vix, pcr, indicators...) — same as above
@@ -200,6 +201,7 @@ for name, ticker in assets.items():
 
     df2.dropna(subset=features, inplace=True)
     if df2.empty:
+        print(f"{ticker}: No valid feature rows after processing.")
         continue
 
     tail = df2.iloc[-2:]
@@ -230,9 +232,11 @@ for name, ticker in assets.items():
         requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
         # store as plain int for JSON safety
         last_state[ticker] = int(curr_s)
-        write_state(last_state)
+        STATE_FILE.write_text(json.dumps(last_state))
+        print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, Signal: {signal}, Ratio: {ratio_text})")
+    else:
+        print(f"{ticker}: No regime change ({last_for_ticker}→{curr_s}), no alert sent. (Signal would be: {signal}, Ratio: {ratio_text})")
 
-    print(f"{ticker}: {signal}  (ratio {ratio_text})")
 
 
 
