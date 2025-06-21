@@ -2,6 +2,7 @@ name: HMM Daily Alert
 
 on:
   schedule:
+    # Runs every 15 min for testing; change to '0 0 * * *' for 8am SGT only
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
@@ -34,12 +35,17 @@ jobs:
           printf '%s' "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp-key.json
         shell: bash
 
-      # Validate the GCP JSON
+      # 🔍 Hex dump the first 100 bytes for diagnosis
+      - name: Print first 100 bytes of GCP JSON (safe)
+        run: |
+          head -c 100 /tmp/gcp-key.json | xxd
+
+      # Validate GCP JSON (should still fail, but let's see the hex above)
       - name: Validate GCP JSON (safe)
         run: |
           python -c "import json; json.load(open('/tmp/gcp-key.json'))" && echo 'GCP JSON is valid'
 
-
+      # Run bot with correct GCP credentials
       - name: Run bot
         run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
         env:
