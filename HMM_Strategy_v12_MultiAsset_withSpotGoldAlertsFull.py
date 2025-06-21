@@ -9,7 +9,6 @@ HMM Multi-Asset v12 Telegram Bot: Signal-Change with GCS persistence (bucket: my
 
 import os
 import json
-from pathlib import Path
 
 import nltk
 nltk.download('vader_lexicon', quiet=True)
@@ -26,23 +25,30 @@ from bs4 import BeautifulSoup
 import requests
 import joblib
 
-# --- GCS storage ---------------------------------------------
 from google.cloud import storage
 
+# --- GCS storage ---------------------------------------------
 def download_last_signals(bucket_name="my-hmm-state", file_name='last_signal.json'):
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(file_name)
-    if blob.exists():
-        return json.loads(blob.download_as_text())
-    else:
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(file_name)
+        if blob.exists():
+            return json.loads(blob.download_as_text())
+        else:
+            return {}
+    except Exception as e:
+        print(f"Error downloading last_signal.json from GCS: {e}")
         return {}
 
 def upload_last_signals(last_signals, bucket_name="my-hmm-state", file_name='last_signal.json'):
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(file_name)
-    blob.upload_from_string(json.dumps(last_signals))
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(file_name)
+        blob.upload_from_string(json.dumps(last_signals))
+    except Exception as e:
+        print(f"Error uploading last_signal.json to GCS: {e}")
 
 # --- Telegram config -----------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -217,9 +223,12 @@ for name, ticker in assets.items():
 
     last_for_ticker = last_signals.get(ticker)
     if last_for_ticker != curr_signal:
-        requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
-        last_signals[ticker] = curr_signal
-        upload_last_signals(last_signals, GCS_BUCKET)
-        print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, Signal: {signal_icon}, Ratio: {ratio_text})")
+        try:
+            requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
+            last_signals[ticker] = curr_signal
+            upload_last_signals(last_signals, GCS_BUCKET)
+            print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, Signal: {signal_icon}, Ratio: {ratio_text})")
+        except Exception as e:
+            print(f"Error sending alert for {ticker}: {e}")
     else:
         print(f"{ticker}: No signal change ({last_for_ticker}→{curr_signal}), no alert sent. (Signal would be: {signal_icon}, Ratio: {ratio_text})")
