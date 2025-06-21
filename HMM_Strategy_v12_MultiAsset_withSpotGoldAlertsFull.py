@@ -3,8 +3,8 @@
 
 """
 📊 HMM Strategy v12: Multi-Asset (Spot Gold) & Two-Signal Mapping
-— Sends Telegram alerts with “BH vs HMM” ratio, per‐asset regime memory, robust JSON, and full-backtest ratio.
-— Prints for every asset: "Sent alert" or "No regime change, no alert sent."
+— SIGNAL-CHANGE APPROACH: Sends Telegram alerts ONLY when the signal ("BUY"/"SELL") changes for each asset.
+— Stores last signal for each asset in last_signal.json for robust, non-redundant alerts.
 """
 
 import os
@@ -33,12 +33,12 @@ if not BOT_TOKEN:
 CHAT_ID = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# ─── Per‐Asset Last‐State Persistence ───────────────────────
-STATE_FILE = Path("last_state.json")
-if STATE_FILE.exists():
-    last_state = json.loads(STATE_FILE.read_text())
+# ─── Per-Asset Last Signal Persistence ─────────────────────
+SIGNAL_FILE = Path("last_signal.json")
+if SIGNAL_FILE.exists():
+    last_signal = json.loads(SIGNAL_FILE.read_text())
 else:
-    last_state = {}  # initialize every asset with None
+    last_signal = {}  # initialize every asset with None
 
 # ─── Assets & Date Range ────────────────────────────────────
 assets = {
@@ -186,32 +186,30 @@ for name, ticker in assets.items():
     X2 = scaler.transform(tail[features].values)
     prev_s, curr_s = model.predict(X2)[-2:]
 
+    signal = "BUY" if curr_s in pos_states else "SELL"
+    price  = tail[close_col].iat[-1]
+    date   = tail.index[-1].date()
+
     # BH vs HMM ratio from full backtest
     cumM = info['cum_market']
     cumH = info['cum_hmm']
     ratio_text = "N/A" if cumM == 0 else f"{(cumH / cumM):.2f}×"
 
-    signal = "✅ ENTER / BUY" if curr_s in pos_states else "🚫 EXIT / SELL"
-    price  = tail[close_col].iat[-1]
-    date   = tail.index[-1].date()
-
     msg = (
         f"📊 HMM v12 Alert — {ticker}\n"
         f"Date: {date}\n"
         f"Prev→Curr: {prev_s} → {curr_s}\n"
-        f"Signal:   {signal}\n"
+        f"Signal:   {'✅ ENTER / BUY' if signal == 'BUY' else '🚫 EXIT / SELL'}\n"
         f"Price:    ${price:.2f}\n"
         f"BH vs HMM:{ratio_text}"
     )
 
-    last_for_ticker = last_state.get(ticker)
-    if last_for_ticker is None or int(curr_s) != int(last_for_ticker):
+    last_for_ticker = last_signal.get(ticker)
+    if last_for_ticker is None or signal != last_for_ticker:
         requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
-        # store as plain int for JSON safety
-        last_state[ticker] = int(curr_s)
-        STATE_FILE.write_text(json.dumps(last_state))
-        print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, Signal: {signal}, Ratio: {ratio_text})")
+        # store signal for JSON safety
+        last_signal[ticker] = signal
+        SIGNAL_FILE.write_text(json.dumps(last_signal))
+        print(f"{ticker}: Sent alert (Signal: {signal}, Ratio: {ratio_text})")
     else:
-        print(f"{ticker}: No regime change ({prev_s}→{curr_s}), no alert sent. (Signal would be: {signal}, Ratio: {ratio_text})")
-
-
+        print(f"{ticker}: No signal change (still {signal}), no alert sent. (Ratio: {ratio_text})")
