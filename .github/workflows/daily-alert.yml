@@ -2,7 +2,7 @@ name: HMM Daily Alert
 
 on:
   schedule:
-    # Runs every 15 min for testing; change to '0 0 * * *' for 8 AM SGT only
+    # for testing: every 15m → change to '0 0 * * *' for once per day at 00:00 UTC (08:00 SGT)
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
@@ -42,25 +42,24 @@ jobs:
           import nltk
           nltk.download('vader_lexicon')
           EOF
+        shell: bash
 
-      # ─── Export the secret into a file ───────────────────────────────
       - name: Export GCP Service Account JSON
         run: |
           printf '%s' "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp-key.json
         shell: bash
 
-      # ─── DEBUG: print first two lines so you can see what's really there ─────────
       - name: DEBUG: show first 2 lines of gcp-key.json
         run: |
           echo "---- FIRST 2 LINES OF /tmp/gcp-key.json ----"
           head -n 2 /tmp/gcp-key.json
           echo "--------------------------------------------"
+        shell: bash
 
-      # ─── Now run your bot ─────────────────────────────────────────────
       - name: Run bot
         run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:   ${{ secrets.CHAT_ID }}
-          # point Google’s libraries to that file
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-key.json
+        shell: bash
