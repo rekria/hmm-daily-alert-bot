@@ -8,8 +8,7 @@
 
 import os
 import json
-from pathlib import Path
-
+import tempfile
 import nltk
 nltk.download('vader_lexicon', quiet=True)
 
@@ -25,6 +24,35 @@ from bs4 import BeautifulSoup
 import requests
 import joblib
 
+# --- Google Cloud Storage for state ---
+from google.cloud import storage
+
+# GCP service account (read from env, set in GitHub Actions secret)
+gcp_key = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+if not gcp_key:
+    raise RuntimeError("Missing GCP service account JSON (set as env var GCP_SERVICE_ACCOUNT_JSON)")
+with tempfile.NamedTemporaryFile(delete=False, mode='w') as tf:
+    tf.write(gcp_key)
+    key_file = tf.name
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_file
+
+bucket_name = "my-hmm-state"      # CHANGE TO YOUR BUCKET NAME!
+blob_name   = "last_state.json"
+
+client = storage.Client()
+bucket = client.bucket(bucket_name)
+blob = bucket.blob(blob_name)
+
+def read_state():
+    try:
+        data = blob.download_as_text()
+        return json.loads(data)
+    except Exception:
+        return {}
+
+def write_state(state):
+    blob.upload_from_string(json.dumps(state))
+
 # ─── Load Telegram Credentials ────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -32,13 +60,8 @@ if not BOT_TOKEN:
 CHAT_ID = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# ─── Per‐Asset Last‐State Persistence ─────────────────────────────────
-STATE_FILE = Path("last_state.json")
-if STATE_FILE.exists():
-    last_state = json.loads(STATE_FILE.read_text())
-else:
-    # initialize every asset with None
-    last_state = {}
+# ─── Per‐Asset Last‐State Persistence (GCP) ──────────────────────────
+last_state = read_state()
 
 # ─── Assets & Date Range ─────────────────────────────────────────────
 assets = {
@@ -94,8 +117,7 @@ for name, ticker in assets.items():
     df['MACD_diff'] = macd.macd_diff()
     df['RSI']       = ta.momentum.RSIIndicator(close=df[close_col]).rsi()
     if vol_col:
-        df['Volume_Z'] = ((df[vol_col] - df[vol_col].rolling(20).mean()) /
-                          df[vol_col].rolling(20).std())
+        df['Volume_Z'] = ((df[vol_col] - df[vol_col].rolling(20).mean()) / df[vol_col].rolling(20).std())
 
     features = ['LogReturn','MACD','MACD_diff','RSI','NewsSentiment','VIX','PCR']
     if 'Volume_Z' in df.columns:
@@ -208,9 +230,10 @@ for name, ticker in assets.items():
         requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
         # store as plain int for JSON safety
         last_state[ticker] = int(curr_s)
-        STATE_FILE.write_text(json.dumps(last_state))
+        write_state(last_state)
 
     print(f"{ticker}: {signal}  (ratio {ratio_text})")
+
 
 
 
