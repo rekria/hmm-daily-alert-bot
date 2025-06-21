@@ -3,7 +3,7 @@ name: HMM Daily Alert
 on:
   schedule:
     # Runs daily at 00:00 UTC → 08:00 Singapore time
-    - cron: '0 0 * * *'
+    - cron: '*/3 * * * *'
   workflow_dispatch:
 jobs:
   run-alert:
