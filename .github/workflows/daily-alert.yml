@@ -35,6 +35,7 @@ jobs:
             joblib \
             matplotlib \
             google-cloud-storage
+        shell: bash
 
       - name: Download NLTK data
         run: |
@@ -49,7 +50,7 @@ jobs:
           printf '%s' "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp-key.json
         shell: bash
 
-      - name: DEBUG: show first 2 lines of gcp-key.json
+      - name: "DEBUG: show first 2 lines of /tmp/gcp-key.json"
         run: |
           echo "---- FIRST 2 LINES OF /tmp/gcp-key.json ----"
           head -n 2 /tmp/gcp-key.json
