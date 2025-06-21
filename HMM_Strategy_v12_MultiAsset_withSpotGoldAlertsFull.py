@@ -19,7 +19,8 @@ nltk.download('vader_lexicon')
 
 # In[2]:
 
-
+import json
+from pathlib import Path
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -33,6 +34,16 @@ import requests
 import joblib
 import matplotlib.pyplot as plt
 import os
+
+# ─── Persisted state file ────────────────────────────────────────────
+STATE_FILE = Path("last_state.json")
+if STATE_FILE.exists():
+    last = json.loads(STATE_FILE.read_text())
+    last_state = last.get("state")
+else:
+    last_state = None
+# ──────────────────────────────────────────────────────────────────────
+
 
 # Telegram config
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -187,8 +198,13 @@ for name, ticker in assets.items():
         continue
 
     tail = df2.iloc[-2:]
-    X2 = scaler.transform(tail[features].values)
-    prev_s, curr_s = model.predict(X2)[-2:]
+    prev_s, curr_s = model.predict(scaler.transform(tail[features]))[-2:]
+    
+    # ─── Only send if regime changed ─────────────────────────────────────
+    if curr_s == last_state:
+        print(f"{ticker}: no change (still state {curr_s}); skipping send.")
+        continue
+    # ─────────────────────────────────────────────────────────────────────
 
     signal = "✅ ENTER / BUY" if curr_s in pos_states else "🚫 EXIT / SELL"
     price = tail[close_col].iloc[-1]
@@ -201,8 +217,13 @@ for name, ticker in assets.items():
     requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
     print(f"{ticker}: {signal}")
 
+    # ─── Record that we just messaged for this state ────────────────────
+    STATE_FILE.write_text(json.dumps({"state": curr_s}))
+    # ────────────────────────────────────────────────────────────────────
+
 
 # In[ ]:
+
 
 
 
