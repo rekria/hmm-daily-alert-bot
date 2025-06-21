@@ -29,18 +29,15 @@ jobs:
           nltk.download('vader_lexicon')
           EOF
 
-      # NEW: Export GCP Service Account JSON for GCS access
-      - name: Export GCP Service Account JSON
+      # Write GCP Service Account Key to file
+      - name: Write GCP Service Account Key to file
         run: |
-          echo "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp.json
-        shell: bash
+          echo "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > gcp-key.json
 
-      # NEW: Set ENV var for Python to read GCP credentials as a string
       - name: Run bot
-        run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/gcp-key.json"
+          python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:   ${{ secrets.CHAT_ID }}
-          # This passes GCP credentials as a string
-          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
-
