@@ -2,8 +2,7 @@
 # coding: utf-8
 
 """
-HMM Multi-Asset v12 Telegram Bot: Signal-Change with GCS persistence.
-
+HMM Multi-Asset v12 Telegram Bot: Signal-Change with GCS persistence (bucket: my-hmm-state)
 - Stores last signal ("BUY"/"SELL") per asset in GCS last_signal.json.
 - Only fires Telegram alert on a *signal* change, not regime number.
 """
@@ -30,7 +29,7 @@ import joblib
 # --- GCS storage ---------------------------------------------
 from google.cloud import storage
 
-def download_last_signals(bucket_name, file_name='last_signal.json'):
+def download_last_signals(bucket_name="my-hmm-state", file_name='last_signal.json'):
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(file_name)
@@ -39,7 +38,7 @@ def download_last_signals(bucket_name, file_name='last_signal.json'):
     else:
         return {}
 
-def upload_last_signals(last_signals, bucket_name, file_name='last_signal.json'):
+def upload_last_signals(last_signals, bucket_name="my-hmm-state", file_name='last_signal.json'):
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(file_name)
@@ -52,9 +51,7 @@ if not BOT_TOKEN:
 CHAT_ID = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-GCS_BUCKET = os.getenv("GCS_BUCKET_NAME")
-if not GCS_BUCKET:
-    raise RuntimeError("Environment variable GCS_BUCKET_NAME not set")
+GCS_BUCKET = "my-hmm-state"   # <-- bucket name is now fixed here
 
 # --- Assets --------------------------------------------------
 assets = {
@@ -226,4 +223,3 @@ for name, ticker in assets.items():
         print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, Signal: {signal_icon}, Ratio: {ratio_text})")
     else:
         print(f"{ticker}: No signal change ({last_for_ticker}→{curr_signal}), no alert sent. (Signal would be: {signal_icon}, Ratio: {ratio_text})")
-
