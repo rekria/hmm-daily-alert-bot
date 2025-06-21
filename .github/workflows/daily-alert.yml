@@ -21,6 +21,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install yfinance hmmlearn pandas numpy scikit-learn ta feedparser nltk beautifulsoup4 requests joblib matplotlib google-cloud-storage
+        shell: bash
 
       - name: Download NLTK data
         run: |
@@ -28,6 +29,7 @@ jobs:
           import nltk
           nltk.download('vader_lexicon')
           EOF
+        shell: bash
 
       # Export GCP Service Account JSON (use printf, not echo!)
       - name: Export GCP Service Account JSON
@@ -41,11 +43,13 @@ jobs:
           echo "----START OF gcp-key.json----"
           cat /tmp/gcp-key.json
           echo "----END OF gcp-key.json----"
+        shell: bash
 
-      # 🔍 Validate GCP JSON (safe, does NOT print contents)
+      # Validate GCP JSON (safe, does NOT print contents)
       - name: Validate GCP JSON (safe)
         run: |
           python -c "import json; json.load(open('/tmp/gcp-key.json'))" && echo 'GCP JSON is valid'
+        shell: bash
 
       # Run bot with correct GCP credentials
       - name: Run bot
@@ -54,3 +58,4 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:   ${{ secrets.CHAT_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-key.json
+        shell: bash
