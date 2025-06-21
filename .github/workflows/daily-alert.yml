@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install yfinance hmmlearn pandas numpy scikit-learn ta feedparser nltk beautifulsoup4 requests joblib matplotlib google-cloud-storage
@@ -29,15 +29,16 @@ jobs:
           nltk.download('vader_lexicon')
           EOF
 
-      # Write GCP Service Account Key to file
-      - name: Write GCP Service Account Key to file
+      # Export GCP Service Account JSON (use printf, not echo!)
+      - name: Export GCP Service Account JSON
         run: |
-          echo "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > gcp-key.json
+          printf '%s' "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp-key.json
+        shell: bash
 
+      # Run bot with correct GCP credentials
       - name: Run bot
-        run: |
-          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/gcp-key.json"
-          python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
+        run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:   ${{ secrets.CHAT_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-key.json
