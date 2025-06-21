@@ -2,13 +2,14 @@ name: HMM Daily Alert
 
 on:
   schedule:
-    # Runs every 15 min for testing; change to '0 0 * * *' for 8am SGT only
+    # change to '0 0 * * *' for 8 AM SGT daily once you’re done testing
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
   run-alert:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v3
 
@@ -20,7 +21,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance hmmlearn pandas numpy scikit-learn ta feedparser nltk beautifulsoup4 requests joblib matplotlib google-cloud-storage
+          pip install \
+            yfinance hmmlearn pandas numpy scikit-learn ta \
+            feedparser nltk beautifulsoup4 requests joblib \
+            matplotlib google-cloud-storage
 
       - name: Download NLTK data
         run: |
@@ -31,27 +35,35 @@ jobs:
         shell: bash
 
       - name: Export GCP Service Account JSON
-        run: |
-          printf '%s' "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" > /tmp/gcp-key.json
         shell: bash
-
-      # 🔍 Safe Debug: Print only the first line (should start with {)
-      - name: Print GCP JSON first line (for debug)
         run: |
-          echo "----FIRST LINE OF gcp-key.json----"
-          head -n 1 /tmp/gcp-key.json
+          # Convert literal "\n" in your secret into real newlines:
+          echo "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" \
+            | sed 's|\\n|\n|g' \
+            > /tmp/gcp-key.json
+
+      - name: Print first line of GCP JSON (debug only)
+        shell: bash
+        run: |
+          echo "----FIRST LINE----"
+          head -n 1 /tmp/gcp-key.json || echo "(file missing)"
           echo "----END FIRST LINE----"
-        shell: bash
 
-      - name: Validate GCP JSON (safe)
-        run: |
-          python -c "import json; json.load(open('/tmp/gcp-key.json'))" && echo 'GCP JSON is valid'
+      - name: Validate GCP JSON
         shell: bash
+        run: |
+          python - <<EOF
+          import json
+          json.load(open('/tmp/gcp-key.json'))
+          print("✅ GCP JSON is valid")
+          EOF
 
       - name: Run bot
-        run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
+        shell: bash
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID:   ${{ secrets.CHAT_ID }}
+          # point Google client library at our reconstructed file:
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-key.json
-        shell: bash
+        run: |
+          python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
