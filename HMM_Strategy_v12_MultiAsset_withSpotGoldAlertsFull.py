@@ -4,11 +4,13 @@
 """
 📊 HMM Strategy v12: Multi-Asset (Spot Gold) & Two-Signal Mapping
 — Sends Telegram alerts with “BH vs HMM” ratio, per‐asset regime memory, robust JSON, and full-backtest ratio.
+— Prints for every asset: "Sent alert" or "No regime change, no alert sent."
 """
 
 import os
 import json
-import tempfile
+from pathlib import Path
+
 import nltk
 nltk.download('vader_lexicon', quiet=True)
 
@@ -24,46 +26,21 @@ from bs4 import BeautifulSoup
 import requests
 import joblib
 
-# --- Google Cloud Storage for state ---
-from google.cloud import storage
-
-# GCP service account (read from env, set in GitHub Actions secret)
-gcp_key = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
-if not gcp_key:
-    raise RuntimeError("Missing GCP service account JSON (set as env var GCP_SERVICE_ACCOUNT_JSON)")
-with tempfile.NamedTemporaryFile(delete=False, mode='w') as tf:
-    tf.write(gcp_key)
-    key_file = tf.name
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_file
-
-bucket_name = "my-hmm-state"      # CHANGE TO YOUR BUCKET NAME!
-blob_name   = "last_state.json"
-
-client = storage.Client()
-bucket = client.bucket(bucket_name)
-blob = bucket.blob(blob_name)
-
-def read_state():
-    try:
-        data = blob.download_as_text()
-        return json.loads(data)
-    except Exception:
-        return {}
-
-def write_state(state):
-    blob.upload_from_string(json.dumps(state))
-
-# ─── Load Telegram Credentials ────────────────────────────────────────
+# ─── Load Telegram Credentials ──────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN not set")
 CHAT_ID = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# ─── Per‐Asset Last‐State Persistence (GCP) ──────────────────────────
-last_state = read_state()
+# ─── Per‐Asset Last‐State Persistence ───────────────────────
+STATE_FILE = Path("last_state.json")
+if STATE_FILE.exists():
+    last_state = json.loads(STATE_FILE.read_text())
+else:
+    last_state = {}  # initialize every asset with None
 
-# ─── Assets & Date Range ─────────────────────────────────────────────
+# ─── Assets & Date Range ────────────────────────────────────
 assets = {
     'SPY':   'SPY',
     'TSLA':  'TSLA',
@@ -76,7 +53,7 @@ END_DATE   = pd.Timestamp.today().strftime('%Y-%m-%d')
 
 sia = SentimentIntensityAnalyzer()
 
-# ─── TRAINING LOOP ────────────────────────────────────────────────────
+# ─── TRAINING LOOP ──────────────────────────────────────────
 results = {}
 for name, ticker in assets.items():
     # 1) News Sentiment
@@ -117,7 +94,8 @@ for name, ticker in assets.items():
     df['MACD_diff'] = macd.macd_diff()
     df['RSI']       = ta.momentum.RSIIndicator(close=df[close_col]).rsi()
     if vol_col:
-        df['Volume_Z'] = ((df[vol_col] - df[vol_col].rolling(20).mean()) / df[vol_col].rolling(20).std())
+        df['Volume_Z'] = ((df[vol_col] - df[vol_col].rolling(20).mean()) /
+                          df[vol_col].rolling(20).std())
 
     features = ['LogReturn','MACD','MACD_diff','RSI','NewsSentiment','VIX','PCR']
     if 'Volume_Z' in df.columns:
@@ -153,7 +131,7 @@ for name, ticker in assets.items():
 
     print(f"{ticker}: Buy&Hold → {results[ticker]['cum_market']:.4f}, HMM → {results[ticker]['cum_hmm']:.4f}")
 
-# ─── ALERT LOOP ───────────────────────────────────────────────────────
+# ─── ALERT LOOP ──────────────────────────────────────────────────────
 LOOKBACK = 60
 for name, ticker in assets.items():
     info       = results[ticker]
@@ -167,7 +145,7 @@ for name, ticker in assets.items():
     if isinstance(df2.columns, pd.MultiIndex):
         df2.columns = [' '.join(c).strip() for c in df2.columns.values]
     if len(df2) < LOOKBACK//2:
-        print(f"{ticker}: Insufficient data for alert.")
+        print(f"{ticker}: Not enough data for alert evaluation.")
         continue
 
     # recompute features on df2 (news, vix, pcr, indicators...) — same as above
@@ -201,7 +179,7 @@ for name, ticker in assets.items():
 
     df2.dropna(subset=features, inplace=True)
     if df2.empty:
-        print(f"{ticker}: No valid feature rows after processing.")
+        print(f"{ticker}: Not enough feature data for alert evaluation.")
         continue
 
     tail = df2.iloc[-2:]
@@ -226,7 +204,6 @@ for name, ticker in assets.items():
         f"BH vs HMM:{ratio_text}"
     )
 
-    # only send if it actually flipped for this ticker
     last_for_ticker = last_state.get(ticker)
     if last_for_ticker is None or int(curr_s) != int(last_for_ticker):
         requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
@@ -235,11 +212,6 @@ for name, ticker in assets.items():
         STATE_FILE.write_text(json.dumps(last_state))
         print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, Signal: {signal}, Ratio: {ratio_text})")
     else:
-        print(f"{ticker}: No regime change ({last_for_ticker}→{curr_s}), no alert sent. (Signal would be: {signal}, Ratio: {ratio_text})")
-
-
-
-
-
+        print(f"{ticker}: No regime change ({prev_s}→{curr_s}), no alert sent. (Signal would be: {signal}, Ratio: {ratio_text})")
 
 
