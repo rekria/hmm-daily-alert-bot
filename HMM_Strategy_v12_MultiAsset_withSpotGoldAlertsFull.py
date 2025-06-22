@@ -30,7 +30,7 @@ STATE_FILE = Path("last_state.json")
 if STATE_FILE.exists():
     last_state = json.loads(STATE_FILE.read_text())
 else:
-    last_state = {}  # initialize each asset → None
+    last_state = {}
 # ──────────────────────────────────────────────────────────────────────
 
 # Telegram config
@@ -38,12 +38,12 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID   = os.environ.get("CHAT_ID", "1669179604")
 BASE_URL  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# Assets and date range
+# Assets & date range
 assets = {
     'SPY':  'SPY',
     'TSLA': 'TSLA',
     'BYD':  '1211.HK',
-    'GOLD': 'GC=F',   # Spot Gold futures
+    'GOLD': 'GC=F',
     'DBS':  'D05.SI'
 }
 START_DATE = '2010-01-01'
@@ -51,7 +51,7 @@ END_DATE   = pd.Timestamp.today().strftime('%Y-%m-%d')
 
 sia = SentimentIntensityAnalyzer()
 
-# ── Train per‐asset models ─────────────────────────────────────────────
+# ── TRAINING LOOP ────────────────────────────────────────────────────
 results = {}
 for name, ticker in assets.items():
     # 1) News sentiment
@@ -123,14 +123,14 @@ for name, ticker in assets.items():
         'close_col':  close_col
     }
 
-    # Print cumulative performances
+    # Print full backtest performance
     df['Position'] = df['HiddenState'].isin(pos_states).astype(int)
     df['StratRet'] = df['LogReturn'] * df['Position']
     df['CumulM']   = np.exp(df['LogReturn'].cumsum())
     df['CumulS']   = np.exp(df['StratRet'].cumsum())
     print(f"{ticker}: Buy & Hold → {df['CumulM'].iat[-1]:.4f}, HMM Strategy → {df['CumulS'].iat[-1]:.4f}")
 
-# ── Generate Telegram Alerts ────────────────────────────────────────────
+# ── ALERT LOOP ────────────────────────────────────────────────────────────
 LOOKBACK = 60
 for name, ticker in assets.items():
     info       = results[ticker]
@@ -147,23 +147,23 @@ for name, ticker in assets.items():
     if len(df2) < LOOKBACK // 2:
         continue
 
-    # Recompute features on df2...
+    # Recompute df2 features
     df2['NewsSentiment'] = np.mean([sia.polarity_scores(e.title)['compound']
                                     for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]) or 0.0
 
-    vix2 = yf.download('^VIX', start=df2.index.min(), end=df2.index.max(),
-                       progress=False, auto_adjust=False)
-    if isinstance(vix2.columns, pd.MultiIndex):
-        vix2.columns = [' '.join(c).strip() for c in vix2.columns.values]
-    vc2 = next(c for c in vix2.columns if 'Close' in c)
-    df2['VIX'] = ((vix2[vc2] - vix2[vc2].rolling(20).mean()) /
-                  vix2[vc2].rolling(20).std()).fillna(0)
+    v2 = yf.download('^VIX', start=df2.index.min(), end=df2.index.max(),
+                     progress=False, auto_adjust=False)
+    if isinstance(v2.columns, pd.MultiIndex):
+        v2.columns = [' '.join(c).strip() for c in v2.columns.values]
+    vc2 = next(c for c in v2.columns if 'Close' in c)
+    df2['VIX'] = ((v2[vc2] - v2[vc2].rolling(20).mean()) /
+                  v2[vc2].rolling(20).std()).fillna(0)
 
     resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options',
                         headers={'User-Agent':'Mozilla/5.0'})
     soup = BeautifulSoup(resp.text, 'html.parser')
-    el   = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
-    pcr  = float(el.text) if el and el.text.strip() else 0.0
+    el  = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
+    pcr = float(el.text) if el and el.text.strip() else 0.0
     df2['PCR'] = ((pd.Series(pcr, index=df2.index) -
                    pd.Series(pcr, index=df2.index).rolling(20).mean()) /
                   pd.Series(pcr, index=df2.index).rolling(20).std()).fillna(0)
@@ -181,23 +181,28 @@ for name, ticker in assets.items():
     if df2.empty:
         continue
 
-    tail = df2.iloc[-2:]
+    tail = df2.iloc[-2:].copy()
     X2   = scaler.transform(tail[features])
-    prev_s, curr_s = model.predict(X2)[-2:]
+    preds = model.predict(X2)
+
+    # ←── NEW: attach HiddenState back to tail so the next line works
+    tail['HiddenState'] = preds
+
+    prev_s, curr_s = preds[-2:]
 
     signal = "✅ ENTER / BUY" if curr_s in pos_states else "🚫 EXIT / SELL"
     price  = tail[close_col].iat[-1]
     date   = tail.index[-1].date()
 
-    # BH vs HMM ratio
+    # BH vs HMM ratio safely
     last_m = np.exp(tail['LogReturn'].cumsum()).iat[-1]
-    last_s = np.exp((tail['LogReturn'] * (tail['HiddenState'] .isin(pos_states))).cumsum()).iat[-1]
-    ratio_text = "N/A" if last_m == 0 else f"{(last_s/last_m):.2%}"
+    last_s = np.exp((tail['LogReturn'] * (tail['HiddenState'].isin(pos_states))).cumsum()).iat[-1]
+    ratio_text = "N/A" if last_m == 0 else f"{last_s/last_m:.2%}"
 
     msg = (
         f"📊 HMM v12 Alert — {ticker}\n"
         f"Date: {date}\n"
-        f"Prev→Curr: {prev_s}→{curr_s}\n"
+        f"Prev→Curr: {prev_s} → {curr_s}\n"
         f"Signal:    {signal}\n"
         f"Price:     ${price:.2f}\n"
         f"BH vs HMM: {ratio_text}"
@@ -205,10 +210,9 @@ for name, ticker in assets.items():
 
     last_for_ticker = last_state.get(ticker)
     if last_for_ticker is None or curr_s != last_for_ticker:
-        # cast to native int here:
-        last_state[ticker] = int(curr_s)
+        last_state[ticker] = int(curr_s)   # ensure native int
         STATE_FILE.write_text(json.dumps(last_state))
         requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
         print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, {ratio_text})")
     else:
-        print(f"{ticker}: No regime change ({prev_s}→{curr_s}), no alert sent. (Would be: {signal}, {ratio_text})")
+        print(f"{ticker}: No regime change ({prev_s}→{curr_s}), no alert sent.")
