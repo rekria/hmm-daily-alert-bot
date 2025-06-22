@@ -31,6 +31,8 @@ from google.cloud import storage
 GCS_BUCKET      = "my-hmm-state"
 STATE_FILE      = "last_signal.json"
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Environment variable BOT_TOKEN not set")
 CHAT_ID         = os.getenv("CHAT_ID", "1669179604")
 BASE_URL        = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 START_DATE      = "2010-01-01"
@@ -69,46 +71,53 @@ def compute_features(df):
     if isinstance(vix.columns, pd.MultiIndex):
         vix.columns = [" ".join(c) for c in vix.columns]
     vcol = next(c for c in vix.columns if "Close" in c)
-    vix_z = (vix[vcol] - vix[vcol].rolling(20).mean())/vix[vcol].rolling(20).std()
+    vix_z = (vix[vcol] - vix[vcol].rolling(20).mean()) / vix[vcol].rolling(20).std()
     df["VIX"] = vix_z.reindex(df.index).fillna(0)
 
-    # 3) PCR z-score
+    # 3) PCR z-score (guarding for missing value)
     resp = requests.get("https://finance.yahoo.com/quote/%5EPCR/options", headers={"User-Agent":"Mozilla/5.0"})
-    soup = BeautifulSoup(resp.text,"html.parser")
-    val  = float(soup.select_one("td[data-test='PUT_CALL_RATIO-value']").text or 0)
-    pcr  = pd.Series(val, index=df.index)
-    df["PCR"] = (pcr - pcr.rolling(20).mean())/pcr.rolling(20).std()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    el   = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
+    if el and el.text.strip():
+        try:
+            pcr_val = float(el.text.strip())
+        except ValueError:
+            pcr_val = 0.0
+    else:
+        pcr_val = 0.0
+    pcr = pd.Series(pcr_val, index=df.index)
+    df["PCR"] = ((pcr - pcr.rolling(20).mean()) / pcr.rolling(20).std()).fillna(0)
 
     # 4) Returns & indicators
     close = next(c for c in df.columns if "Close" in c and not c.startswith("Adj"))
-    df["LogReturn"] = np.log(df[close]/df[close].shift(1))
+    df["LogReturn"] = np.log(df[close] / df[close].shift(1))
     macd = ta.trend.MACD(close=df[close])
     df["MACD"]      = macd.macd()
     df["MACD_diff"] = macd.macd_diff()
     df["RSI"]       = ta.momentum.RSIIndicator(close=df[close]).rsi()
-    vol = next((c for c in df.columns if "Volume" in c),None)
+    vol = next((c for c in df.columns if "Volume" in c), None)
     if vol:
-        df["Volume_Z"] = (df[vol]-df[vol].rolling(20).mean())/df[vol].rolling(20).std()
+        df["Volume_Z"] = (df[vol] - df[vol].rolling(20).mean()) / df[vol].rolling(20).std()
 
     return df
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────
 def main():
-    # --- 1) Download full history & build global feature matrix
+    # 1) Build global features for scaler
     all_feats = []
     for ticker in assets.values():
         df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False)
-        if isinstance(df.columns,pd.MultiIndex):
+        if isinstance(df.columns, pd.MultiIndex):
             df.columns = [" ".join(c) for c in df.columns]
         df = compute_features(df).dropna(subset=feature_cols)
         all_feats.append(df[feature_cols])
     global_df = pd.concat(all_feats)
-    
-    # --- 2) Fit one scaler over all assets
+
+    # 2) Fit & save one global scaler
     scaler = StandardScaler().fit(global_df)
     joblib.dump(scaler, "global_scaler_v12.pkl")
 
-    # --- 3) Train each HMM & record backtest cumulatives
+    # 3) Train HMM per asset & backtest cumulatives
     results = {}
     for name,ticker in assets.items():
         df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False)
@@ -120,17 +129,17 @@ def main():
         m.fit(X)
         df["State"] = m.predict(X)
         pos = df.groupby("State")["LogReturn"].mean()>0
-        pos_states = list(pos[pos].index)
-        df["Pos"] = df["State"].isin(pos_states).astype(int)
+        ps  = list(pos[pos].index)
+        df["Pos"]   = df["State"].isin(ps).astype(int)
         results[ticker] = {
-            "model":m, "pos_states":pos_states,
+            "model":m, "pos_states":ps,
             "back_bh":np.exp(df["LogReturn"].cumsum()).iat[-1],
             "back_hm":np.exp((df["LogReturn"]*df["Pos"]).cumsum()).iat[-1]
         }
         joblib.dump(m, f"hmm_{ticker.lower()}_v12.pkl")
 
-    # --- 4) Load last signals & alert loop
-    last_signals = download_last_signals()
+    # 4) Alert loop
+    last = download_last_signals()
     for name,ticker in assets.items():
         info = results[ticker]
         m, ps = info["model"], info["pos_states"]
@@ -139,34 +148,29 @@ def main():
             df2.columns = [" ".join(c) for c in df2.columns]
         df2 = compute_features(df2).dropna(subset=feature_cols)
         if len(df2)<2:
-            print(f"{ticker}: skipping, insufficient lookback data")
+            print(f"{ticker}: skipping, insufficient lookback")
             continue
 
-        X2 = scaler.transform(df2[feature_cols])
-        st = m.predict(X2)
-        curr_sig = "BUY" if st[-1] in ps else "SELL"
-        
-        # Send if flipped
-        if last_signals.get(ticker)!=curr_sig:
+        X2   = scaler.transform(df2[feature_cols])
+        st   = m.predict(X2)
+        sig  = "BUY" if st[-1] in ps else "SELL"
+        if last.get(ticker)!=sig:
             price = df2[next(c for c in df2.columns if "Close" in c)].iat[-1]
-            rh = info["back_hm"]/info["back_bh"]
-            icon = "✅ BUY" if curr_sig=="BUY" else "🚫 SELL"
-            msg = (
+            rh    = info["back_hm"]/info["back_bh"]
+            icon  = "✅ BUY" if sig=="BUY" else "🚫 SELL"
+            msg   = (
                 f"📊 {ticker} Alert\n"
                 f"Signal: {icon}\n"
                 f"Price:  ${price:.2f}\n"
                 f"BH vs HMM: {rh:.2f}×"
             )
             requests.post(BASE_URL, json={"chat_id":CHAT_ID,"text":msg})
-            last_signals[ticker]=curr_sig
-            print(f"{ticker}: sent {curr_sig}")
+            print(f"{ticker}: sent {sig}")
+            last[ticker] = sig
         else:
-            print(f"{ticker}: no change ({curr_sig})")
+            print(f"{ticker}: no change ({sig})")
 
-    upload_last_signals(last_signals)
-
+    upload_last_signals(last)
 
 if __name__=="__main__":
-    if not BOT_TOKEN:
-        raise RuntimeError("Set BOT_TOKEN")
     main()
