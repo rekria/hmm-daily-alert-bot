@@ -2,14 +2,14 @@
 # coding: utf-8
 
 """
-📊 HMM Strategy v12: Multi-Asset (Spot Gold) & Two-Signal Mapping
-— Sends Telegram alerts with “BH vs HMM” ratio, per‐asset regime memory, robust JSON, and full‐backtest ratio.
+HMM Multi-Asset v12 Telegram Bot: Signal‐Change with GCS persistence (bucket: my-hmm-state)
+- Stores last signal ("BUY"/"SELL") per asset in GCS last_signal.json.
+- Only fires Telegram alert on a *signal* change, not regime number.
+- Reports full multi‐year backtest ratio (HMM vs Buy & Hold).
 """
 
 import os
 import json
-from pathlib import Path
-
 import nltk
 nltk.download('vader_lexicon', quiet=True)
 
@@ -25,20 +25,39 @@ from bs4 import BeautifulSoup
 import requests
 import joblib
 
-# ─── Persisted state file ────────────────────────────────────────────
-STATE_FILE = Path("last_state.json")
-if STATE_FILE.exists():
-    last_state = json.loads(STATE_FILE.read_text())
-else:
-    last_state = {}
-# ──────────────────────────────────────────────────────────────────────
+from google.cloud import storage
 
-# Telegram config
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID   = os.environ.get("CHAT_ID", "1669179604")
-BASE_URL  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+# ――― GCS storage ―――
+def download_last_signals(bucket_name="my-hmm-state", file_name='last_signal.json'):
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(file_name)
+        if blob.exists():
+            return json.loads(blob.download_as_text())
+    except Exception as e:
+        print(f"Error downloading last_signal.json from GCS: {e}")
+    return {}
 
-# Assets & date range
+def upload_last_signals(last_signals, bucket_name="my-hmm-state", file_name='last_signal.json'):
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(file_name)
+        blob.upload_from_string(json.dumps(last_signals))
+    except Exception as e:
+        print(f"Error uploading last_signal.json to GCS: {e}")
+
+# ――― Telegram config ―――
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Environment variable BOT_TOKEN not set")
+CHAT_ID = os.getenv("CHAT_ID", "1669179604")
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+GCS_BUCKET = "my-hmm-state"
+
+# ――― Assets & dates ―――
 assets = {
     'SPY':  'SPY',
     'TSLA': 'TSLA',
@@ -51,7 +70,10 @@ END_DATE   = pd.Timestamp.today().strftime('%Y-%m-%d')
 
 sia = SentimentIntensityAnalyzer()
 
-# ── TRAINING LOOP ────────────────────────────────────────────────────
+# ――― Load last signals ―――
+last_signals = download_last_signals(GCS_BUCKET)
+
+# ――― TRAINING LOOP ―――
 results = {}
 for name, ticker in assets.items():
     # 1) News sentiment
@@ -60,13 +82,13 @@ for name, ticker in assets.items():
     news_score = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
 
     # 2) Price history
-    df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False, auto_adjust=False)
+    df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [' '.join(c).strip() for c in df.columns.values]
     df['NewsSentiment'] = news_score
 
     # 3) VIX Z-score
-    vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), progress=False, auto_adjust=False)
+    vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), progress=False)
     if isinstance(vix.columns, pd.MultiIndex):
         vix.columns = [' '.join(c).strip() for c in vix.columns.values]
     vix_col = next(c for c in vix.columns if 'Close' in c)
@@ -77,15 +99,15 @@ for name, ticker in assets.items():
     resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options',
                         headers={'User-Agent':'Mozilla/5.0'})
     soup = BeautifulSoup(resp.text, 'html.parser')
-    el = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
+    el   = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
     pcr_val = float(el.text) if el and el.text.strip() else 0.0
-    series_pcr = pd.Series(pcr_val, index=df.index)
-    df['PCR'] = ((series_pcr - series_pcr.rolling(20).mean()) /
-                 series_pcr.rolling(20).std()).fillna(0)
+    s1 = pd.Series(pcr_val, index=df.index)
+    df['PCR'] = ((s1 - s1.rolling(20).mean()) / s1.rolling(20).std()).fillna(0)
 
-    # 5) Feature engineering
+    # 5) Features
     close_col = next(c for c in df.columns if 'Close' in c and not c.startswith('Adj'))
     vol_col   = next((c for c in df.columns if 'Volume' in c), None)
+
     df['LogReturn'] = np.log(df[close_col] / df[close_col].shift(1))
     macd = ta.trend.MACD(close=df[close_col])
     df['MACD']      = macd.macd()
@@ -101,36 +123,36 @@ for name, ticker in assets.items():
 
     # 6) Train HMM
     scaler = StandardScaler().fit(df[features])
-    X = scaler.transform(df[features])
-    model = GaussianHMM(n_components=3, covariance_type='diag',
-                        n_iter=1000, tol=1e-4, random_state=42)
+    X      = scaler.transform(df[features])
+    model  = GaussianHMM(n_components=3, covariance_type='diag',
+                         n_iter=1000, tol=1e-4, random_state=42)
     model.fit(X)
     df['HiddenState'] = model.predict(X)
 
-    # 7) Identify positive regimes
+    # 7) Positive regimes
     state_ret  = df.groupby('HiddenState')['LogReturn'].mean()
     pos_states = state_ret[state_ret > 0].index.tolist()
 
     # Persist model + scaler
-    joblib.dump(model,  f'hmm_{ticker.lower()}_v12_diag_2signal.pkl')
-    joblib.dump(scaler, f'scaler_{ticker.lower()}_v12_diag_2signal.pkl')
+    joblib.dump(model,   f'hmm_{ticker.lower()}_v12_diag_2signal.pkl')
+    joblib.dump(scaler,  f'scaler_{ticker.lower()}_v12_diag_2signal.pkl')
 
+    # Store multi-year backtest
+    cumM = np.exp(df['LogReturn'].cumsum()).iloc[-1]
+    cumS = np.exp((df['LogReturn'] * df['HiddenState'].isin(pos_states)).cumsum()).iloc[-1]
     results[ticker] = {
         'model':      model,
         'scaler':     scaler,
         'features':   features,
         'pos_states': pos_states,
-        'close_col':  close_col
+        'close_col':  close_col,
+        'cum_market': cumM,
+        'cum_hmm':    cumS
     }
 
-    # Print full backtest performance
-    df['Position'] = df['HiddenState'].isin(pos_states).astype(int)
-    df['StratRet'] = df['LogReturn'] * df['Position']
-    df['CumulM']   = np.exp(df['LogReturn'].cumsum())
-    df['CumulS']   = np.exp(df['StratRet'].cumsum())
-    print(f"{ticker}: Buy & Hold → {df['CumulM'].iat[-1]:.4f}, HMM Strategy → {df['CumulS'].iat[-1]:.4f}")
+    print(f"{ticker}: Buy & Hold → {cumM:.4f}, HMM → {cumS:.4f}")
 
-# ── ALERT LOOP ────────────────────────────────────────────────────────────
+# ――― ALERT LOOP ―――
 LOOKBACK = 60
 for name, ticker in assets.items():
     info       = results[ticker]
@@ -140,19 +162,18 @@ for name, ticker in assets.items():
     pos_states = info['pos_states']
     close_col  = info['close_col']
 
-    df2 = yf.download(ticker, period=f"{LOOKBACK}d", interval="1d",
-                      progress=False, auto_adjust=False)
+    df2 = yf.download(ticker, period=f"{LOOKBACK}d", interval="1d", progress=False)
     if isinstance(df2.columns, pd.MultiIndex):
         df2.columns = [' '.join(c).strip() for c in df2.columns.values]
-    if len(df2) < LOOKBACK // 2:
+    if len(df2) < LOOKBACK//2:
+        print(f"{ticker}: Not enough data for alert evaluation.")
         continue
 
-    # Recompute df2 features
+    # recompute features for df2 (news, vix, pcr, indicators…)
     df2['NewsSentiment'] = np.mean([sia.polarity_scores(e.title)['compound']
                                     for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]) or 0.0
 
-    v2 = yf.download('^VIX', start=df2.index.min(), end=df2.index.max(),
-                     progress=False, auto_adjust=False)
+    v2 = yf.download('^VIX', start=df2.index.min(), end=df2.index.max(), progress=False)
     if isinstance(v2.columns, pd.MultiIndex):
         v2.columns = [' '.join(c).strip() for c in v2.columns.values]
     vc2 = next(c for c in v2.columns if 'Close' in c)
@@ -162,11 +183,10 @@ for name, ticker in assets.items():
     resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options',
                         headers={'User-Agent':'Mozilla/5.0'})
     soup = BeautifulSoup(resp.text, 'html.parser')
-    el  = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
-    pcr = float(el.text) if el and el.text.strip() else 0.0
-    df2['PCR'] = ((pd.Series(pcr, index=df2.index) -
-                   pd.Series(pcr, index=df2.index).rolling(20).mean()) /
-                  pd.Series(pcr, index=df2.index).rolling(20).std()).fillna(0)
+    el   = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
+    pcr  = float(el.text) if el and el.text.strip() else 0.0
+    spcr = pd.Series(pcr, index=df2.index)
+    df2['PCR'] = ((spcr - spcr.rolling(20).mean()) / spcr.rolling(20).std()).fillna(0)
 
     df2['LogReturn'] = np.log(df2[close_col] / df2[close_col].shift(1))
     macd2 = ta.trend.MACD(close=df2[close_col])
@@ -179,40 +199,41 @@ for name, ticker in assets.items():
 
     df2.dropna(subset=features, inplace=True)
     if df2.empty:
+        print(f"{ticker}: Not enough feature data for alert evaluation.")
         continue
 
-    tail = df2.iloc[-2:].copy()
+    tail = df2.iloc[-2:]
     X2   = scaler.transform(tail[features])
-    preds = model.predict(X2)
+    prev_s, curr_s = model.predict(X2)[-2:]
+    curr_signal    = "BUY" if curr_s in pos_states else "SELL"
 
-    # ←── NEW: attach HiddenState back to tail so the next line works
-    tail['HiddenState'] = preds
+    # ←— HERE: Use full-history backtest ratio
+    cumM = info['cum_market']
+    cumH = info['cum_hmm']
+    ratio_text = f"{(cumH / cumM):.2f}×"
 
-    prev_s, curr_s = preds[-2:]
-
-    signal = "✅ ENTER / BUY" if curr_s in pos_states else "🚫 EXIT / SELL"
-    price  = tail[close_col].iat[-1]
-    date   = tail.index[-1].date()
-
-    # BH vs HMM ratio safely
-    last_m = np.exp(tail['LogReturn'].cumsum()).iat[-1]
-    last_s = np.exp((tail['LogReturn'] * (tail['HiddenState'].isin(pos_states))).cumsum()).iat[-1]
-    ratio_text = "N/A" if last_m == 0 else f"{last_s/last_m:.2%}"
+    signal_icon = "✅ ENTER / BUY" if curr_signal == "BUY" else "🚫 EXIT / SELL"
+    price       = tail[close_col].iat[-1]
+    date        = tail.index[-1].date()
 
     msg = (
         f"📊 HMM v12 Alert — {ticker}\n"
         f"Date: {date}\n"
         f"Prev→Curr: {prev_s} → {curr_s}\n"
-        f"Signal:    {signal}\n"
-        f"Price:     ${price:.2f}\n"
-        f"BH vs HMM: {ratio_text}"
+        f"Signal:   {signal_icon}\n"
+        f"Price:    ${price:.2f}\n"
+        f"BH vs HMM:{ratio_text}"
     )
 
-    last_for_ticker = last_state.get(ticker)
-    if last_for_ticker is None or curr_s != last_for_ticker:
-        last_state[ticker] = int(curr_s)   # ensure native int
-        STATE_FILE.write_text(json.dumps(last_state))
-        requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
-        print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, {ratio_text})")
+    last = last_signals.get(ticker)
+    if last != curr_signal:
+        # send & persist
+        try:
+            requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
+            last_signals[ticker] = curr_signal
+            upload_last_signals(last_signals, GCS_BUCKET)
+            print(f"{ticker}: Sent alert (Prev→Curr: {prev_s}→{curr_s}, Signal: {signal_icon}, Ratio: {ratio_text})")
+        except Exception as e:
+            print(f"Error sending alert for {ticker}: {e}")
     else:
-        print(f"{ticker}: No regime change ({prev_s}→{curr_s}), no alert sent.")
+        print(f"{ticker}: No signal change ({last}→{curr_signal}), no alert sent. (Signal would be: {signal_icon}, Ratio: {ratio_text})")
