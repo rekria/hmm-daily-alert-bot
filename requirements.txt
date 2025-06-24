@@ -1,0 +1,12 @@
+yfinance
+pandas
+numpy
+scikit-learn
+hmmlearn
+ta
+feedparser
+nltk
+beautifulsoup4
+requests
+joblib
+google-cloud-storage
