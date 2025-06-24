@@ -4,7 +4,7 @@ on:
   workflow_dispatch:  # Allows manual trigger
   push:
     branches:
-      - hmm-v12a-per-asset-scaling
+      - hmm-v12a-per-asser-scalling
 
 jobs:
   run-v12a:
