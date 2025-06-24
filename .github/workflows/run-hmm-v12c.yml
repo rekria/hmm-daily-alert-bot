@@ -1,0 +1,23 @@
+name: Run HMM Strategy v12c
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-v12c:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install yfinance hmmlearn scikit-learn pandas matplotlib seaborn
+
+      - name: Run v12c Strategy
+        run: python HMM_Strategy_v12c_Enhanced.py
