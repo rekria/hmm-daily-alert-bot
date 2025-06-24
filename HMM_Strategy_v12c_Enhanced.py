@@ -25,7 +25,7 @@ START_DATE = '2015-01-01'
 END_DATE = '2024-12-31'
 STATE_RANGE = range(2, 15)  # Reduced range to prevent overfitting
 VOLATILITY_THRESHOLD = 0.015
-SHARPE_THRESHOLD = 0.2
+SHARPE_THRESHOLD = 0.1
 DURATION_THRESHOLD = 10
 
 # Output paths
