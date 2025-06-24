@@ -18,3 +18,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python HMM_Strategy_v12a_MultiAsset_PerAssetScaler.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
