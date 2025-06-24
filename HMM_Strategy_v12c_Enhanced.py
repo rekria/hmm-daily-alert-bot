@@ -34,7 +34,7 @@ summary_results = []
 
 for ticker in TICKERS:
     print(f"🔍 Processing: {ticker}")
-    df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False)
+    df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False, auto_adjust=False)
     if df.empty:
         print(f"⚠️ No data for {ticker}. Skipping.")
         continue
