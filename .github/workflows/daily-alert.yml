@@ -3,7 +3,7 @@ name: HMM Daily Alert
 on:
   schedule:
     # switch to '0 0 * * *' for daily at 00:00 UTC → 08:00 SGT or '0 21 * * 1-5 for Tuesday to Saturday at 05:00 SGT
-    - cron: '0 0 * * *'
+    - cron: '0 21 * * 1-5'
   workflow_dispatch:
 
 jobs:
