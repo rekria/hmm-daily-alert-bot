@@ -1,0 +1,31 @@
+name: Run HMM Strategy v12a (Per-Asset Scaling)
+
+on:
+  push:
+    branches: [ hmm-v12a-per-asset-scaling ]
+  workflow_dispatch:
+
+jobs:
+  run-hmm-strategy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run HMM Strategy Script
+        run: |
+          python HMM_Strategy_v12a_MultiAsset_PerAssetScaler.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
