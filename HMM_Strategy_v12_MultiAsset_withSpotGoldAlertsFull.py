@@ -136,9 +136,9 @@ for name, ticker in ASSETS.items():
 missing = set(FEATURE_COLS) - set(df.columns)
 if missing:
     print(f"⚠️ Missing features for {ticker}: {missing}")
-if not valid_features:
-    print(f"❌ Skipping {ticker} — no valid features available")
-    continue
+    if not valid_features:
+        print(f"❌ Skipping {ticker} — no valid features available")
+        continue
 
     # Proceed only if there are enough valid features
 if valid_features:
