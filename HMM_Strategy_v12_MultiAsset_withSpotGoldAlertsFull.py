@@ -22,22 +22,9 @@ from google.cloud import storage
 
 # ─── Config ──────────────────────────────────────────────────────────────
 ASSETS = {
-    'SPY': 'SPY',
-    'TSLA': 'TSLA',
-    'BYD': '1211.HK',
-    'GOLD': 'GC=F',
-    'DBS': 'D05.SI',
-    'AAPL': 'AAPL',
-    'MSFT': 'MSFT',
-    'GOOGL': 'GOOGL',
-    'AMZN': 'AMZN',
-    'NVDA': 'NVDA',
-    'META': 'META',
-    'NFLX': 'NFLX',
-    'ASML': 'ASML',
-    'TSM': 'TSM',
-    'BABA': 'BABA',
-    'BA': 'BA'
+    'SPY': 'SPY', 'TSLA': 'TSLA', 'BYD': '1211.HK', 'GOLD': 'GC=F', 'DBS': 'D05.SI',
+    'AAPL': 'AAPL', 'MSFT': 'MSFT', 'GOOGL': 'GOOGL', 'AMZN': 'AMZN', 'NVDA': 'NVDA',
+    'META': 'META', 'NFLX': 'NFLX', 'ASML': 'ASML', 'TSM': 'TSM', 'BABA': 'BABA', 'BA': 'BA'
 }
 START_DATE = '2017-01-01'
 END_DATE = None
@@ -117,7 +104,7 @@ summary = []
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
-        df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=False, progress=False)
+        df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
         df['LogReturn'] = np.log(df['Adj Close']).diff()
         df.dropna(inplace=True)
     except Exception as e:
@@ -127,7 +114,7 @@ for name, ticker in ASSETS.items():
     titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
     df['NewsSentiment'] = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
 
-    vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), progress=False)
+    vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), auto_adjust=True, progress=False)
     vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
     df['VIX'] = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std()).reindex(df.index).fillna(0)
 
@@ -140,9 +127,10 @@ for name, ticker in ASSETS.items():
         pcr_val = 0.0
     df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-    df['MACD'] = MACD(df['Adj Close']).macd()
-    df['MACD_diff'] = MACD(df['Adj Close']).macd_diff()
-    df['RSI'] = RSIIndicator(df['Adj Close']).rsi()
+    close_series = df['Adj Close'].squeeze()
+    df['MACD'] = MACD(close_series).macd()
+    df['MACD_diff'] = MACD(close_series).macd_diff()
+    df['RSI'] = RSIIndicator(close_series).rsi()
     df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
     df.dropna(subset=FEATURE_COLS, inplace=True)
 
