@@ -1,329 +1,241 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-"""
-📊 HMM Strategy v12: Multi-Asset (Spot Gold) & Two-Signal Mapping
-— Sends Telegram alerts with “BH vs HMM” ratio, per‐asset regime memory in GCS,
-  full backtest ratio, and prints “Sent alert” or “No change” for each asset.
-— Fits one global StandardScaler, then trains each asset’s HMM on scaled features.
-— Recomputes identical features in the alert lookback window.
-— Skips assets missing lookback features.
-— Stores “BUY”/“SELL” in last_signal.json on GCS; only fires on signal change.
-"""
+# HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts, GCS Signal & Regime Tracking, and CSV Logging
+# Author: ChatGPT (on behalf of @rekria)
 
 import os
 import json
-from pathlib import Path
-
-import nltk
-nltk.download('vader_lexicon', quiet=True)
-
-import yfinance as yf
-import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-from hmmlearn.hmm import GaussianHMM
-import ta
-import feedparser
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from bs4 import BeautifulSoup
+import pandas as pd
+import yfinance as yf
 import requests
 import joblib
+import warnings
+from datetime import datetime
 
+from hmmlearn.hmm import GaussianHMM
+from sklearn.preprocessing import StandardScaler
+from ta.trend import MACD
+from ta.momentum import RSIIndicator
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import feedparser
+from bs4 import BeautifulSoup
 from google.cloud import storage
 
-# ─── GCS storage ---------------------------------------------
-def download_last_signals(bucket_name="my-hmm-state",
-                          file_name="last_signal.json"):
+# ─── Config ──────────────────────────────────────────────────────────────
+ASSETS = {
+    'SPY': 'SPY',
+    'TSLA': 'TSLA',
+    'BYD': '1211.HK',
+    'GOLD': 'GC=F',
+    'DBS': 'D05.SI',
+    'AAPL': 'AAPL',
+    'MSFT': 'MSFT',
+    'GOOGL': 'GOOGL',
+    'AMZN': 'AMZN',
+    'NVDA': 'NVDA',
+    'META': 'META',
+    'NFLX': 'NFLX',
+    'ASML': 'ASML',
+    'TSM': 'TSM',
+    'BABA': 'BABA',
+    'BA': 'BA'
+}
+START_DATE = '2017-01-01'
+END_DATE = None
+STATE_RANGE = range(2, 30)
+SHARPE_THRESHOLD = 0.1
+DURATION_THRESHOLD = 10
+ROLLING_HYBRID_WINDOW = 10
+LOOKBACK = 60
+
+FEATURE_COLS = [
+    'LogReturn', 'MACD', 'MACD_diff', 'RSI',
+    'NewsSentiment', 'VIX', 'PCR', 'Volume_Z'
+]
+
+GCS_BUCKET = "my-hmm-state"
+SIGNAL_LOG_FILE = "signal_log.csv"
+BACKTEST_FILE = "backtest_summary.csv"
+
+# ─── GCS Utilities ───────────────────────────────────────────────────────
+def download_last_signals(file_name='last_signal.json'):
     try:
         client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob   = bucket.blob(file_name)
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(file_name)
         if blob.exists():
             return json.loads(blob.download_as_text())
     except Exception as e:
-        print(f"Error downloading last_signal.json from GCS: {e}")
+        print(f"Error downloading {file_name} from GCS: {e}")
     return {}
 
-def upload_last_signals(signals,
-                        bucket_name="my-hmm-state",
-                        file_name="last_signal.json"):
+def upload_last_signals(signals, file_name='last_signal.json'):
     try:
         client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob   = bucket.blob(file_name)
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(file_name)
         blob.upload_from_string(json.dumps(signals))
     except Exception as e:
-        print(f"Error uploading last_signal.json to GCS: {e}")
+        print(f"Error uploading {file_name} to GCS: {e}")
 
-# ─── Telegram config -----------------------------------------
+def append_signal_log(row_dict):
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(SIGNAL_LOG_FILE)
+        header = not blob.exists()
+        local_file = "/tmp/signal_log.csv"
+        df = pd.DataFrame([row_dict])
+        df.to_csv(local_file, index=False, mode='a', header=header)
+        blob.upload_from_filename(local_file)
+    except Exception as e:
+        print(f"Error appending to signal_log.csv: {e}")
+
+def upload_backtest_summary(df):
+    try:
+        local_path = "/tmp/backtest_summary.csv"
+        df.to_csv(local_path, index=False)
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(BACKTEST_FILE)
+        blob.upload_from_filename(local_path)
+    except Exception as e:
+        print(f"Error uploading backtest_summary.csv to GCS: {e}")
+
+# ─── Telegram ─────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN not set")
 CHAT_ID  = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-GCS_BUCKET = "my-hmm-state"
-
-# ─── Assets & Dates ------------------------------------------
-assets = {
-    'SPY':   'SPY',
-    'TSLA':  'TSLA',
-    'BYD':   '1211.HK',
-    'GOLD':  'GC=F',    # Spot gold futures
-    'DBS':   'D05.SI'
-}
-START_DATE = '2010-01-01'
-END_DATE   = pd.Timestamp.today().strftime('%Y-%m-%d')
-
-# NLTK sentiment
+# ─── Init ─────────────────────────────────────────────────────────────────
 sia = SentimentIntensityAnalyzer()
+last_signals = download_last_signals()
+summary = []
 
-# ─── Load last signals from GCS ------------------------------
-last_signals = download_last_signals(GCS_BUCKET)
-
-# ─── TRAINING LOOP: collect features for global scaler ───────
-feature_cols = [
-    'LogReturn','MACD','MACD_diff','RSI',
-    'NewsSentiment','VIX','PCR','Volume_Z'
-]
-all_X   = []
-results = {}
-
-for name, ticker in assets.items():
-    # 1) News Sentiment
-    feed   = feedparser.parse('https://finance.yahoo.com/news/rss')
-    titles = [e.title for e in feed.entries]
-    news_score = np.mean([sia.polarity_scores(t)['compound']
-                          for t in titles]) if titles else 0.0
-
-    # 2) Download history
-    df = yf.download(ticker,
-                     start=START_DATE,
-                     end=END_DATE,
-                     progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [' '.join(c).strip() for c in df.columns.values]
-    df['NewsSentiment'] = news_score
-
-    # 3) VIX Z-score
-    vix = yf.download('^VIX',
-                      start=df.index.min(),
-                      end=df.index.max(),
-                      progress=False)
-    if isinstance(vix.columns, pd.MultiIndex):
-        vix.columns = [' '.join(c).strip() for c in vix.columns.values]
-    vix_col = next(c for c in vix.columns if 'Close' in c)
-    df['VIX'] = ((vix[vix_col] - vix[vix_col].rolling(20).mean()) /
-                 vix[vix_col].rolling(20).std()).fillna(0)
-
-    # 4) Put/Call Ratio Z-score
-    resp = requests.get(
-        'https://finance.yahoo.com/quote/%5EPCR/options',
-        headers={'User-Agent':'Mozilla/5.0'}
-    )
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    el   = soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
-    pcr_val = float(el.text) if el and el.text.strip() else 0.0
-    s1  = pd.Series(pcr_val, index=df.index)
-    df['PCR'] = ((s1 - s1.rolling(20).mean()) /
-                 s1.rolling(20).std()).fillna(0)
-
-    # 5) Feature Engineering
-    close_col = next(c for c in df.columns
-                     if 'Close' in c and not c.startswith('Adj'))
-    vol_col   = next((c for c in df.columns if 'Volume' in c), None)
-
-    # 5a) Log returns
-    df['LogReturn'] = np.log(df[close_col] /
-                             df[close_col].shift(1))
-
-    # 5b) MACD, MACD_diff
-    macd = ta.trend.MACD(close=df[close_col])
-    df['MACD']      = macd.macd()
-    df['MACD_diff'] = macd.macd_diff()
-
-    # 5c) RSI
-    df['RSI'] = ta.momentum.RSIIndicator(
-        close=df[close_col]).rsi()
-
-    # 5d) Volume Z
-    if vol_col:
-        df['Volume_Z'] = ((df[vol_col] -
-                           df[vol_col].rolling(20).mean()) /
-                          df[vol_col].rolling(20).std()).fillna(0)
-    else:
-        df['Volume_Z'] = 0.0
-
-    # drop any rows missing these features
-    df.dropna(subset=feature_cols, inplace=True)
-
-    # stash df & close column for later
-    results[ticker] = {
-        'df':        df,
-        'close_col': close_col
-    }
-
-    # collect X for scaler
-    all_X.append(df[feature_cols].values)
-
-# 6) Fit one global scaler
-X_all  = np.vstack(all_X)
-scaler = StandardScaler().fit(X_all)
-
-# 7) Train HMM per asset & full backtest
-for ticker, info in results.items():
-    df    = info['df']
-    X     = scaler.transform(df[feature_cols])
-    model = GaussianHMM(n_components=3,
-                        covariance_type='diag',
-                        n_iter=1000,
-                        tol=1e-4,
-                        random_state=42)
-    model.fit(X)
-
-    # assign hidden states
-    states = model.predict(X)
-    df['HiddenState'] = states
-
-    # identify positive regimes by mean log-return
-    state_ret  = df.groupby('HiddenState')['LogReturn'].mean()
-    pos_states = state_ret[state_ret > 0].index.tolist()
-    df['InPos'] = df['HiddenState'].isin(pos_states).astype(int)
-
-    # persist model & scaler locally if desired
-    joblib.dump(model,
-        f"hmm_{ticker.lower()}_v12_diag_2signal.pkl")
-    joblib.dump(scaler,
-        f"scaler_{ticker.lower()}_v12_diag_2signal.pkl")
-
-    # compute full backtest cumulatives
-    cumM  = np.exp(df['LogReturn'].cumsum()).iloc[-1]
-    cumH  = np.exp((df['LogReturn'] * df['InPos']).cumsum()).iloc[-1]
-    ratio = cumH / cumM if cumM else np.nan
-
-    # store backtest results
-    info.update({
-        'model':      model,
-        'pos_states': pos_states,
-        'cumM':       cumM,
-        'cumH':       cumH,
-        'ratio':      ratio
-    })
-
-    print(f"{ticker}: Buy&Hold → {cumM:.4f}, "
-          f"HMM → {cumH:.4f}, Ratio → {ratio:.2f}×")
-
-# ─── ALERT LOOP ----------------------------------------------
-LOOKBACK = 60
-
-for ticker, info in results.items():
-    df2 = yf.download(ticker,
-                      period=f"{LOOKBACK}d",
-                      interval="1d",
-                      progress=False)
-    if isinstance(df2.columns, pd.MultiIndex):
-        df2.columns = [' '.join(c).strip()
-                       for c in df2.columns.values]
-
-    # skip if too little data
-    if len(df2) < LOOKBACK // 2:
-        print(f"{ticker}: Not enough data for alerts")
+# ─── Processing Loop ──────────────────────────────────────────────────────
+for name, ticker in ASSETS.items():
+    print(f"\n🔍 Processing: {ticker}")
+    try:
+        df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=False, progress=False)
+        df['LogReturn'] = np.log(df['Adj Close']).diff()
+        df.dropna(inplace=True)
+    except Exception as e:
+        print(f"⚠️ Data download failed for {ticker}: {e}")
         continue
 
-    # — recompute ALL exactly the same features on df2 —
-    # NewsSentiment
-    feed2   = feedparser.parse('https://finance.yahoo.com/news/rss')
-    titles2 = [e.title for e in feed2.entries]
-    news2   = (np.mean([sia.polarity_scores(t)['compound']
-                        for t in titles2])
-               if titles2 else 0.0)
-    df2['NewsSentiment'] = news2
+    titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
+    df['NewsSentiment'] = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
 
-    # VIX z-score
-    v2 = yf.download('^VIX',
-                     start=df2.index.min(),
-                     end=df2.index.max(),
-                     progress=False)
-    if isinstance(v2.columns, pd.MultiIndex):
-        v2.columns = [' '.join(c).strip()
-                      for c in v2.columns.values]
-    vc2 = next(c for c in v2.columns if 'Close' in c)
-    df2['VIX'] = ((v2[vc2] -
-                   v2[vc2].rolling(20).mean()) /
-                  v2[vc2].rolling(20).std()).fillna(0)
+    vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), progress=False)
+    vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
+    df['VIX'] = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std()).reindex(df.index).fillna(0)
 
-    # PCR z-score
-    resp2 = requests.get(
-        'https://finance.yahoo.com/quote/%5EPCR/options',
-        headers={'User-Agent':'Mozilla/5.0'}
-    )
-    soup2 = BeautifulSoup(resp2.text, 'html.parser')
-    el2   = soup2.select_one(
-        "td[data-test='PUT_CALL_RATIO-value']")
-    pcr2  = float(el2.text) if el2 and el2.text.strip() else 0.0
-    s2    = pd.Series(pcr2, index=df2.index)
-    df2['PCR'] = ((s2 -
-                   s2.rolling(20).mean()) /
-                  s2.rolling(20).std()).fillna(0)
+    try:
+        pcr_resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options', headers={'User-Agent':'Mozilla/5.0'})
+        pcr_soup = BeautifulSoup(pcr_resp.text, 'html.parser')
+        el = pcr_soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
+        pcr_val = float(el.text) if el and el.text.strip() else 0.0
+    except:
+        pcr_val = 0.0
+    df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-    # LogReturn, MACD, MACD_diff, RSI, Volume_Z
-    close2 = info['close_col']
-    df2['LogReturn'] = np.log(df2[close2] /
-                              df2[close2].shift(1))
+    df['MACD'] = MACD(df['Adj Close']).macd()
+    df['MACD_diff'] = MACD(df['Adj Close']).macd_diff()
+    df['RSI'] = RSIIndicator(df['Adj Close']).rsi()
+    df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
+    df.dropna(subset=FEATURE_COLS, inplace=True)
 
-    macd2 = ta.trend.MACD(close=df2[close2])
-    df2['MACD']      = macd2.macd()
-    df2['MACD_diff'] = macd2.macd_diff()
-    df2['RSI']       = ta.momentum.RSIIndicator(
-                            close=df2[close2]).rsi()
+    best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
+    for scale_type in ['per-asset', 'global']:
+        try:
+            scaler = StandardScaler()
+            X = scaler.fit_transform(df[['LogReturn']] if scale_type=='per-asset' else df[['LogReturn']].values.reshape(-1,1))
+            for n_states in STATE_RANGE:
+                model = GaussianHMM(n_components=n_states, covariance_type='diag', n_iter=200)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model.fit(X)
+                bic = -2 * model.score(X) + n_states * np.log(len(X))
+                if bic < best_bic:
+                    best_model, best_bic = model, bic
+                    scaler_type, best_states = scale_type, n_states
+            break
+        except Exception as e:
+            print(f"⚠️ {scale_type} scaling failed for {ticker}: {e}")
 
-    volc2 = next((c for c in df2.columns
-                  if 'Volume' in c), None)
-    if volc2:
-        df2['Volume_Z'] = ((df2[volc2] -
-                           df2[volc2].rolling(20).mean()) /
-                          df2[volc2].rolling(20).std()).fillna(0)
+    if best_model is None:
+        print(f"❌ HMM failed — using hybrid fallback for {ticker}")
+        df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
+        regime_seq = [-1, -1]
+        good_states = []
+        sharpe = pd.Series()
     else:
-        df2['Volume_Z'] = 0.0
+        hidden = best_model.predict(X)
+        df['HiddenState'] = hidden
+        sharpe = df.groupby('HiddenState')['LogReturn'].mean() / df.groupby('HiddenState')['LogReturn'].std()
+        durations = df.groupby('HiddenState').size()
+        good_states = sharpe[(sharpe > SHARPE_THRESHOLD) & (durations > DURATION_THRESHOLD)].index.tolist()
+        if not good_states:
+            good_states = [sharpe.idxmax()]
+        df['Position'] = df['HiddenState'].isin(good_states).astype(int)
+        if df['Position'].sum() == 0:
+            df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
+        regime_seq = df['HiddenState'].iloc[-2:].tolist()
 
-    # drop any rows missing features
-    df2.dropna(subset=feature_cols, inplace=True)
-    if df2.empty:
-        print(f"{ticker}: No features in lookback")
-        continue
+    df['StrategyReturn'] = df['LogReturn'] * df['Position']
+    cumM = np.exp(df['LogReturn'].cumsum()).iloc[-1]
+    cumH = np.exp(df['StrategyReturn'].cumsum()).iloc[-1]
+    ratio = cumH / cumM if cumM else 1.0
 
-    # now get last two days’ states
-    tail      = df2.iloc[-2:]
-    X2        = scaler.transform(tail[feature_cols])
-    prev_s, curr_s = info['model'].predict(X2)[-2:]
-    signal    = "BUY" if curr_s in info['pos_states'] else "SELL"
-
-    # build ratio text
-    ratio_text = f"{info['ratio']:.2f}×"
-
-    # prepare Telegram message
-    price = tail[close2].iat[-1]
-    date  = tail.index[-1].date()
-    icon  = "✅ ENTER / BUY" if signal=="BUY" else "🚫 EXIT / SELL"
+    tail = df.iloc[-2:]
+    prev_signal = "BUY" if tail['Position'].iloc[-2] else "SELL"
+    curr_signal = "BUY" if tail['Position'].iloc[-1] else "SELL"
+    last_data = last_signals.get(ticker, {})
+    last_signal = last_data.get("signal")
+    last_regime = last_data.get("regime", -999)
+    curr_regime = regime_seq[-1] if regime_seq[-1] != -1 else None
 
     msg = (
-      f"📊 HMM v12 — {ticker}\n"
-      f"Date: {date}\n"
-      f"Prev→Curr: {prev_s} → {curr_s}\n"
-      f"Signal:   {icon}\n"
-      f"Price:    ${price:.2f}\n"
-      f"BH vs HMM:{ratio_text}"
+        f"📊 HMM v12d — {ticker}\n"
+        f"Prev→Curr Regime: {regime_seq[0]} → {regime_seq[1]}\n"
+        f"Signal: {prev_signal} → {curr_signal}\n"
+        f"Ratio: {ratio:.2f}×\n"
+        f"Price: ${df['Adj Close'].iloc[-1]:.2f}\n"
+        f"States: {best_states} ({scaler_type or 'hybrid'})"
     )
 
-    last_sig = last_signals.get(ticker)
-    if last_sig != signal:
-        # send Telegram alert
-        requests.post(BASE_URL,
-                      json={"chat_id": CHAT_ID,
-                            "text":    msg})
-        last_signals[ticker] = signal
-        upload_last_signals(last_signals, GCS_BUCKET)
-        print(f"{ticker}: Sent alert ({signal})")
+    if last_signal != curr_signal or last_regime != curr_regime:
+        requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
+        last_signals[ticker] = {"signal": curr_signal, "regime": curr_regime}
+        upload_last_signals(last_signals)
+        append_signal_log({
+            "Date": datetime.now().strftime("%Y-%m-%d"),
+            "Ticker": ticker,
+            "Signal": curr_signal,
+            "Regime": curr_regime,
+            "Price": round(df['Adj Close'].iloc[-1], 2),
+            "PrevSignal": prev_signal,
+            "PrevRegime": regime_seq[0],
+            "Ratio": round(ratio, 4)
+        })
+        print(f"✅ {ticker}: Alert sent ({curr_signal})")
     else:
-        print(f"{ticker}: No change ({last_sig}→{signal})")
+        print(f"{ticker}: No signal/regime change ({curr_signal}, Regime {curr_regime})")
+
+    summary.append({
+        'Ticker': ticker,
+        'BuyHoldReturn': round(cumM, 4),
+        'HMMReturn': round(cumH, 4),
+        'Ratio': round(ratio, 4),
+        'ScalerType': scaler_type or 'hybrid',
+        'NumUsedStates': best_states if best_model else 0,
+        'PosRegimes': good_states if best_model else [],
+        'RegimeSharpeMap': sharpe.round(2).to_dict() if best_model else {},
+        'FallbackUsed': best_model is None
+    })
+
+# ─── Save Backtest Summary ───────────────────────────────────────────────
+df_summary = pd.DataFrame(summary)
+upload_backtest_summary(df_summary)
+print("\n✅ Backtest summary uploaded to GCS")
