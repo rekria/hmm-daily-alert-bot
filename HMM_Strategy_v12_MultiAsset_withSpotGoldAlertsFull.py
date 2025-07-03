@@ -105,7 +105,7 @@ for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
         df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
-        df['LogReturn'] = np.log(df['Adj Close']).diff()
+        df['LogReturn'] = np.log(df['Close']).diff()
         df.dropna(inplace=True)
     except Exception as e:
         print(f"⚠️ Data download failed for {ticker}: {e}")
@@ -127,7 +127,7 @@ for name, ticker in ASSETS.items():
         pcr_val = 0.0
     df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-    close_series = df['Adj Close'].squeeze()
+    close_series = df['Close'].squeeze()
     df['MACD'] = MACD(close_series).macd()
     df['MACD_diff'] = MACD(close_series).macd_diff()
     df['RSI'] = RSIIndicator(close_series).rsi()
@@ -189,7 +189,7 @@ for name, ticker in ASSETS.items():
         f"Prev→Curr Regime: {regime_seq[0]} → {regime_seq[1]}\n"
         f"Signal: {prev_signal} → {curr_signal}\n"
         f"Ratio: {ratio:.2f}×\n"
-        f"Price: ${df['Adj Close'].iloc[-1]:.2f}\n"
+        f"Price: ${df['Close'].iloc[-1]:.2f}\n"
         f"States: {best_states} ({scaler_type or 'hybrid'})"
     )
 
@@ -202,7 +202,7 @@ for name, ticker in ASSETS.items():
             "Ticker": ticker,
             "Signal": curr_signal,
             "Regime": curr_regime,
-            "Price": round(df['Adj Close'].iloc[-1], 2),
+            "Price": round(df['Close'].iloc[-1], 2),
             "PrevSignal": prev_signal,
             "PrevRegime": regime_seq[0],
             "Ratio": round(ratio, 4)
