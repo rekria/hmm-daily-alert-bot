@@ -133,10 +133,10 @@ for name, ticker in ASSETS.items():
     df['RSI'] = RSIIndicator(close_series).rsi()
     df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
     valid_features = [col for col in FEATURE_COLS if col in df.columns]
-        missing = set(FEATURE_COLS) - set(df.columns)
-        if missing:
-            print(f"⚠️ Missing features for {ticker}: {missing}")
-        df.dropna(subset=valid_features, inplace=True)
+missing = set(FEATURE_COLS) - set(df.columns)
+if missing:
+    print(f"⚠️ Missing features for {ticker}: {missing}")
+df.dropna(subset=valid_features, inplace=True)
 
     best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
     for scale_type in ['per-asset', 'global']:
