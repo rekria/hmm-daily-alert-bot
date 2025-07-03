@@ -136,7 +136,10 @@ for name, ticker in ASSETS.items():
 missing = set(FEATURE_COLS) - set(df.columns)
 if missing:
     print(f"⚠️ Missing features for {ticker}: {missing}")
-df.dropna(subset=valid_features, inplace=True)
+
+    # Proceed only if there are enough valid features
+if valid_features:
+    df.dropna(subset=valid_features, inplace=True)
 
     best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
     for scale_type in ['per-asset', 'global']:
