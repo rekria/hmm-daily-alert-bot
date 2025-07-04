@@ -1,5 +1,5 @@
 # HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts
-# Final Fix: Improved feature engineering and missing value handling
+# Final Fix: Adaptive state range and robust signal handling
 # Author: ChatGPT (on behalf of @rekria)
 
 import os
@@ -33,7 +33,7 @@ ASSETS = {
 }
 START_DATE = '2017-01-01'
 END_DATE = None
-STATE_RANGE = range(2, 30)
+MAX_STATES = 10  # Reduced from 30 to prevent overfitting
 SHARPE_THRESHOLD = 0.1
 DURATION_THRESHOLD = 10
 ROLLING_HYBRID_WINDOW = 10
@@ -54,7 +54,14 @@ def download_last_signals(file_name='last_signal.json'):
         bucket = client.bucket(GCS_BUCKET)
         blob = bucket.blob(file_name)
         if blob.exists():
-            return json.loads(blob.download_as_text())
+            content = blob.download_as_text()
+            # Ensure we always get a dictionary
+            data = json.loads(content)
+            if isinstance(data, dict):
+                return data
+            else:
+                print(f"⚠️ Downloaded {file_name} is not a dictionary. Returning empty dict.")
+                return {}
     except Exception as e:
         print(f"Error downloading {file_name} from GCS: {e}")
     return {}
@@ -105,6 +112,10 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 # ─── Init ───
 sia = SentimentIntensityAnalyzer()
 last_signals = download_last_signals()
+# Ensure last_signals is always a dictionary
+if not isinstance(last_signals, dict):
+    print("⚠️ Resetting last_signals to empty dictionary")
+    last_signals = {}
 summary = []
 
 # ─── Processing Loop ───
@@ -289,6 +300,17 @@ for name, ticker in ASSETS.items():
 
         # ─── HMM Model ───
         best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
+        
+        # Adaptive state range based on available data
+        max_possible_states = min(MAX_STATES, len(df) - 1)  # Ensure we have at least 1 sample per state
+        state_range = range(2, max_possible_states + 1)
+        
+        if not state_range:
+            print(f"⚠️ Not enough data for HMM modeling ({len(df)} rows). Using fallback.")
+            state_range = [2]  # Minimum state range
+            
+        print(f"Trying state range: {list(state_range)}")
+        
         for scale_type in ['per-asset', 'global']:
             try:
                 scaler = StandardScaler()
@@ -297,19 +319,22 @@ for name, ticker in ASSETS.items():
                 else:  # global scaling
                     X = scaler.fit_transform(df[['LogReturn']].values.reshape(-1, 1))
                 
-                for n_states in STATE_RANGE:
-                    model = GaussianHMM(
-                        n_components=n_states,
-                        covariance_type='diag',
-                        n_iter=200
-                    )
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        model.fit(X)
-                    bic = -2 * model.score(X) + n_states * np.log(len(X))
-                    if bic < best_bic:
-                        best_model, best_bic = model, bic
-                        scaler_type, best_states = scale_type, n_states
+                for n_states in state_range:
+                    try:
+                        model = GaussianHMM(
+                            n_components=n_states,
+                            covariance_type='diag',
+                            n_iter=200
+                        )
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            model.fit(X)
+                        bic = -2 * model.score(X) + n_states * np.log(len(X))
+                        if bic < best_bic:
+                            best_model, best_bic = model, bic
+                            scaler_type, best_states = scale_type, n_states
+                    except Exception as e:
+                        print(f"⚠️ HMM fitting failed for {n_states} states: {str(e)}")
                 # Break if we found a valid model
                 if best_model:
                     break
@@ -318,6 +343,7 @@ for name, ticker in ASSETS.items():
 
         # ─── Position Determination ───
         if best_model is None:
+            print(f"⚠️ Using fallback strategy for {ticker}")
             # Fallback to simple momentum strategy
             momentum = df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW, min_periods=1).mean()
             if momentum.empty:
@@ -328,6 +354,7 @@ for name, ticker in ASSETS.items():
             good_states = []
             sharpe = pd.Series()
         else:
+            print(f"✅ HMM model fitted with {best_states} states")
             hidden = best_model.predict(X)
             df['HiddenState'] = hidden
             
@@ -380,9 +407,15 @@ for name, ticker in ASSETS.items():
             prev_regime = None
             price = 0
 
-        last_data = last_signals.get(ticker, {})
-        last_signal = last_data.get("signal")
-        last_regime = last_data.get("regime", -999)
+        # Robust signal checking
+        try:
+            last_data = last_signals.get(ticker, {})
+            last_signal = last_data.get("signal") if isinstance(last_data, dict) else None
+            last_regime = last_data.get("regime", -999) if isinstance(last_data, dict) else -999
+        except Exception as e:
+            print(f"⚠️ Error accessing last signals: {str(e)}")
+            last_signal = None
+            last_regime = -999
 
         # ─── Telegram Alert ───
         msg = (
@@ -401,6 +434,7 @@ for name, ticker in ASSETS.items():
             except Exception as e:
                 print(f"⚠️ Failed to send Telegram alert for {ticker}: {str(e)}")
             
+            # Update last signals
             last_signals[ticker] = {"signal": curr_signal, "regime": curr_regime}
             upload_last_signals(last_signals)
             
