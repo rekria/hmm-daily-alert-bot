@@ -1,4 +1,6 @@
-# HMM Strategy v12d: Final Stable Copy with Valid Feature Check and Continue Fix
+# HMM Strategy v12d: Final Robust Version with Full Enhancements Retained
+# Author: ChatGPT (for @rekria)
+
 import os
 import json
 import numpy as np
@@ -8,6 +10,7 @@ import requests
 import joblib
 import warnings
 from datetime import datetime
+
 from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
 from ta.trend import MACD
@@ -17,25 +20,12 @@ import feedparser
 from bs4 import BeautifulSoup
 from google.cloud import storage
 
+# ─── Config ──────────────────────────────────────────────────────────────
 ASSETS = {
-    'SPY': 'SPY',
-    'TSLA': 'TSLA',
-    'BYD': '1211.HK',
-    'GOLD': 'GC=F',
-    'DBS': 'D05.SI',
-    'AAPL': 'AAPL',
-    'MSFT': 'MSFT',
-    'GOOGL': 'GOOGL',
-    'AMZN': 'AMZN',
-    'NVDA': 'NVDA',
-    'META': 'META',
-    'NFLX': 'NFLX',
-    'ASML': 'ASML',
-    'TSM': 'TSM',
-    'BABA': 'BABA',
-    'BA': 'BA'
+    'SPY': 'SPY', 'TSLA': 'TSLA', 'BYD': '1211.HK', 'GOLD': 'GC=F', 'DBS': 'D05.SI',
+    'AAPL': 'AAPL', 'MSFT': 'MSFT', 'GOOGL': 'GOOGL', 'AMZN': 'AMZN', 'NVDA': 'NVDA',
+    'META': 'META', 'NFLX': 'NFLX', 'ASML': 'ASML', 'TSM': 'TSM', 'BABA': 'BABA', 'BA': 'BA'
 }
-
 START_DATE = '2017-01-01'
 END_DATE = None
 STATE_RANGE = range(2, 30)
@@ -49,6 +39,13 @@ GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
 BACKTEST_FILE = "backtest_summary.csv"
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Environment variable BOT_TOKEN not set")
+CHAT_ID  = os.getenv("CHAT_ID", "1669179604")
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+# ─── GCS Utilities ───────────────────────────────────────────────────────
 def download_last_signals(file_name='last_signal.json'):
     try:
         client = storage.Client()
@@ -93,17 +90,12 @@ def upload_backtest_summary(df):
     except Exception as e:
         print(f"Error uploading backtest_summary.csv to GCS: {e}")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("Environment variable BOT_TOKEN not set")
-CHAT_ID = os.getenv("CHAT_ID", "1669179604")
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
+# ─── Init ─────────────────────────────────────────────────────────────────
 sia = SentimentIntensityAnalyzer()
 last_signals = download_last_signals()
 summary = []
 
-# ─── Main Processing Loop ────────────────────────────────────────
+# ─── Processing Loop ──────────────────────────────────────────────────────
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
@@ -117,9 +109,12 @@ for name, ticker in ASSETS.items():
     titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
     df['NewsSentiment'] = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
 
-    vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), auto_adjust=True, progress=False)
-    vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
-    df['VIX'] = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std()).reindex(df.index).fillna(0)
+    try:
+        vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), auto_adjust=True, progress=False)
+        vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
+        df['VIX'] = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std()).reindex(df.index).fillna(0)
+    except:
+        df['VIX'] = 0.0
 
     try:
         pcr_resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options', headers={'User-Agent':'Mozilla/5.0'})
@@ -130,29 +125,17 @@ for name, ticker in ASSETS.items():
         pcr_val = 0.0
     df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-    close_series = df['Close'].squeeze()
-    df['MACD'] = MACD(close_series).macd()
-    df['MACD_diff'] = MACD(close_series).macd_diff()
-    df['RSI'] = RSIIndicator(close_series).rsi()
+    df['MACD'] = MACD(df['Close']).macd()
+    df['MACD_diff'] = MACD(df['Close']).macd_diff()
+    df['RSI'] = RSIIndicator(df['Close']).rsi()
     df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
 
-    # ✅ Robust feature check and drop
-    missing = set(FEATURE_COLS) - set(df.columns)
-    if missing:
-        print(f"⚠️ Missing features for {ticker}: {missing}")
-
-    valid_features = [col for col in FEATURE_COLS if col in df.columns]
-    if not valid_features:
-        print(f"❌ Skipping {ticker} — no valid features available")
+    try:
+        df.dropna(subset=FEATURE_COLS, inplace=True)
+    except KeyError as e:
+        print(f"⚠️ Skipping {ticker} — missing feature columns: {e}")
         continue
-    else:
-        try:
-            df.dropna(subset=valid_features, inplace=True)
-        except KeyError as e:
-            print(f"❌ Skipping {ticker} — error dropping rows with missing features: {e}")
-            continue
 
-    # ─── HMM Training & Signal Logic ───────────────────────────────
     best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
     for scale_type in ['per-asset', 'global']:
         try:
@@ -242,7 +225,7 @@ for name, ticker in ASSETS.items():
         'FallbackUsed': best_model is None
     })
 
-# Final summary
+# ─── Save Backtest Summary ───────────────────────────────────────────────
 df_summary = pd.DataFrame(summary)
 upload_backtest_summary(df_summary)
 print("\n✅ Backtest summary uploaded to GCS")
