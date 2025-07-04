@@ -1,5 +1,6 @@
 # HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts, GCS Signal & Regime Tracking, and CSV Logging
 # Author: ChatGPT (on behalf of @rekria)
+# Fix Iteration 1: Ensure MACD outputs are 1D to prevent ndarray shape errors
 
 import os
 import json
@@ -20,24 +21,11 @@ import feedparser
 from bs4 import BeautifulSoup
 from google.cloud import storage
 
-# ─── Config ──────────────────────────────────────────────────────────────
+# ─── Config ───
 ASSETS = {
-    'SPY': 'SPY',
-    'TSLA': 'TSLA',
-    'BYD': '1211.HK',
-    'GOLD': 'GC=F',
-    'DBS': 'D05.SI',
-    'AAPL': 'AAPL',
-    'MSFT': 'MSFT',
-    'GOOGL': 'GOOGL',
-    'AMZN': 'AMZN',
-    'NVDA': 'NVDA',
-    'META': 'META',
-    'NFLX': 'NFLX',
-    'ASML': 'ASML',
-    'TSM': 'TSM',
-    'BABA': 'BABA',
-    'BA': 'BA'
+    'SPY': 'SPY', 'TSLA': 'TSLA', 'BYD': '1211.HK', 'GOLD': 'GC=F', 'DBS': 'D05.SI',
+    'AAPL': 'AAPL', 'MSFT': 'MSFT', 'GOOGL': 'GOOGL', 'AMZN': 'AMZN', 'NVDA': 'NVDA',
+    'META': 'META', 'NFLX': 'NFLX', 'ASML': 'ASML', 'TSM': 'TSM', 'BABA': 'BABA', 'BA': 'BA'
 }
 START_DATE = '2017-01-01'
 END_DATE = None
@@ -48,15 +36,14 @@ ROLLING_HYBRID_WINDOW = 10
 LOOKBACK = 60
 
 FEATURE_COLS = [
-    'LogReturn', 'MACD', 'MACD_diff', 'RSI',
-    'NewsSentiment', 'VIX', 'PCR', 'Volume_Z'
+    'LogReturn', 'MACD', 'MACD_diff', 'RSI', 'NewsSentiment', 'VIX', 'PCR', 'Volume_Z'
 ]
 
 GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
 BACKTEST_FILE = "backtest_summary.csv"
 
-# ─── GCS Utilities ───────────────────────────────────────────────────────
+# ─── GCS Utilities ───
 def download_last_signals(file_name='last_signal.json'):
     try:
         client = storage.Client()
@@ -101,19 +88,19 @@ def upload_backtest_summary(df):
     except Exception as e:
         print(f"Error uploading backtest_summary.csv to GCS: {e}")
 
-# ─── Telegram ─────────────────────────────────────────────────────────────
+# ─── Telegram ───
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN not set")
-CHAT_ID  = os.getenv("CHAT_ID", "1669179604")
+CHAT_ID = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# ─── Init ─────────────────────────────────────────────────────────────────
+# ─── Init ───
 sia = SentimentIntensityAnalyzer()
 last_signals = download_last_signals()
 summary = []
 
-# ─── Processing Loop ──────────────────────────────────────────────────────
+# ─── Processing Loop ───
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
@@ -137,8 +124,12 @@ for name, ticker in ASSETS.items():
             pcr_val = 0.0
         df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-        df['MACD'] = MACD(df['Adj Close']).macd().iloc[:, 0] if isinstance(MACD(df['Adj Close']).macd(), pd.DataFrame) else MACD(df['Adj Close']).macd()
-        df['MACD_diff'] = MACD(df['Adj Close']).macd_diff().iloc[:, 0] if isinstance(MACD(df['Adj Close']).macd_diff(), pd.DataFrame) else MACD(df['Adj Close']).macd_diff()
+        # [Fix Iteration 1] Ensure MACD and MACD_diff outputs are 1D
+        macd_raw = MACD(df['Adj Close']).macd()
+        df['MACD'] = macd_raw.squeeze() if hasattr(macd_raw, 'squeeze') else macd_raw
+        macd_diff_raw = MACD(df['Adj Close']).macd_diff()
+        df['MACD_diff'] = macd_diff_raw.squeeze() if hasattr(macd_diff_raw, 'squeeze') else macd_diff_raw
+
         df['RSI'] = RSIIndicator(df['Adj Close']).rsi().squeeze()
         df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
 
@@ -239,7 +230,7 @@ for name, ticker in ASSETS.items():
     except Exception as e:
         print(f"❌ Skipping {ticker} due to error: {e}")
 
-# ─── Save Backtest Summary ───────────────────────────────────────────────
+# ─── Save Backtest Summary ───
 df_summary = pd.DataFrame(summary)
 upload_backtest_summary(df_summary)
 print("\n✅ Backtest summary uploaded to GCS")
