@@ -1,6 +1,4 @@
-# HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts, GCS Signal & Regime Tracking, and CSV Logging
-# Author: ChatGPT (on behalf of @rekria)
-
+# HMM Strategy v12d: Final Stable Copy with Valid Feature Check and Continue Fix
 import os
 import json
 import numpy as np
@@ -10,7 +8,6 @@ import requests
 import joblib
 import warnings
 from datetime import datetime
-
 from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
 from ta.trend import MACD
@@ -20,12 +17,25 @@ import feedparser
 from bs4 import BeautifulSoup
 from google.cloud import storage
 
-# ─── Config ──────────────────────────────────────────────────────────────
 ASSETS = {
-    'SPY': 'SPY', 'TSLA': 'TSLA', 'BYD': '1211.HK', 'GOLD': 'GC=F', 'DBS': 'D05.SI',
-    'AAPL': 'AAPL', 'MSFT': 'MSFT', 'GOOGL': 'GOOGL', 'AMZN': 'AMZN', 'NVDA': 'NVDA',
-    'META': 'META', 'NFLX': 'NFLX', 'ASML': 'ASML', 'TSM': 'TSM', 'BABA': 'BABA', 'BA': 'BA'
+    'SPY': 'SPY',
+    'TSLA': 'TSLA',
+    'BYD': '1211.HK',
+    'GOLD': 'GC=F',
+    'DBS': 'D05.SI',
+    'AAPL': 'AAPL',
+    'MSFT': 'MSFT',
+    'GOOGL': 'GOOGL',
+    'AMZN': 'AMZN',
+    'NVDA': 'NVDA',
+    'META': 'META',
+    'NFLX': 'NFLX',
+    'ASML': 'ASML',
+    'TSM': 'TSM',
+    'BABA': 'BABA',
+    'BA': 'BA'
 }
+
 START_DATE = '2017-01-01'
 END_DATE = None
 STATE_RANGE = range(2, 30)
@@ -34,16 +44,11 @@ DURATION_THRESHOLD = 10
 ROLLING_HYBRID_WINDOW = 10
 LOOKBACK = 60
 
-FEATURE_COLS = [
-    'LogReturn', 'MACD', 'MACD_diff', 'RSI',
-    'NewsSentiment', 'VIX', 'PCR', 'Volume_Z'
-]
-
+FEATURE_COLS = ['LogReturn', 'MACD', 'MACD_diff', 'RSI', 'NewsSentiment', 'VIX', 'PCR', 'Volume_Z']
 GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
 BACKTEST_FILE = "backtest_summary.csv"
 
-# ─── GCS Utilities ───────────────────────────────────────────────────────
 def download_last_signals(file_name='last_signal.json'):
     try:
         client = storage.Client()
@@ -88,21 +93,19 @@ def upload_backtest_summary(df):
     except Exception as e:
         print(f"Error uploading backtest_summary.csv to GCS: {e}")
 
-# ─── Telegram ─────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN not set")
-CHAT_ID  = os.getenv("CHAT_ID", "1669179604")
+CHAT_ID = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-# ─── Init ─────────────────────────────────────────────────────────────────
 sia = SentimentIntensityAnalyzer()
 last_signals = download_last_signals()
 summary = []
 
-# ─── Processing Loop ──────────────────────────────────────────────────────
+# ─── Main Processing Loop ────────────────────────────────────────
 for name, ticker in ASSETS.items():
-    print(f"🔍 Processing: {ticker}")
+    print(f"\n🔍 Processing: {ticker}")
     try:
         df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
         df['LogReturn'] = np.log(df['Close']).diff()
@@ -133,6 +136,7 @@ for name, ticker in ASSETS.items():
     df['RSI'] = RSIIndicator(close_series).rsi()
     df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
 
+    # ✅ Correct feature check & skip logic
     missing = set(FEATURE_COLS) - set(df.columns)
     if missing:
         print(f"⚠️ Missing features for {ticker}: {missing}")
@@ -144,10 +148,7 @@ for name, ticker in ASSETS.items():
 
     df.dropna(subset=valid_features, inplace=True)
 
-    # Proceed only if there are enough valid features
-if valid_features:
-    df.dropna(subset=valid_features, inplace=True)
-
+    # ─── HMM Training & Signal Logic ───────────────────────────────
     best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
     for scale_type in ['per-asset', 'global']:
         try:
@@ -237,7 +238,7 @@ if valid_features:
         'FallbackUsed': best_model is None
     })
 
-# ─── Save Backtest Summary ───────────────────────────────────────────────
+# Final summary
 df_summary = pd.DataFrame(summary)
 upload_backtest_summary(df_summary)
 print("\n✅ Backtest summary uploaded to GCS")
