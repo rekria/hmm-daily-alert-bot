@@ -102,8 +102,7 @@ summary = []
 
 # ─── Processing Loop ──────────────────────────────────────────────────────
 for name, ticker in ASSETS.items():
-    print(f"
-🔍 Processing: {ticker}")
+    print(f"🔍 Processing: {ticker}")
     try:
         df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
         df['LogReturn'] = np.log(df['Close']).diff()
