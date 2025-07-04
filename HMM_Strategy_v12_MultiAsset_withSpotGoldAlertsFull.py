@@ -129,11 +129,29 @@ for name, ticker in ASSETS.items():
         # [Fix Iteration 1] Ensure MACD and MACD_diff outputs are 1D
         # Iteration 3 Fix: ensure MACD outputs are always 1D series
         # Iteration 3 Fix: Ensures MACD output is always a 1D Series
-        df['MACD'] = MACD(df['Adj Close']).macd().iloc[:, 0] if isinstance(MACD(df['Adj Close']).macd(), pd.DataFrame) else MACD(df['Adj Close']).macd()
+        # Iteration 4 Fix: Explicitly handle MACD output type (DataFrame, Series, ndarray)
+        macd_raw = MACD(df['Adj Close']).macd()
+        if isinstance(macd_raw, pd.DataFrame):
+            df['MACD'] = macd_raw.iloc[:, 0]
+        elif isinstance(macd_raw, pd.Series):
+            df['MACD'] = macd_raw
+        elif isinstance(macd_raw, np.ndarray):
+            df['MACD'] = pd.Series(macd_raw.flatten(), index=df.index)
+        else:
+            raise ValueError(f"Unexpected MACD type: {type(macd_raw)}")
+
+        macd_diff_raw = MACD(df['Adj Close']).macd_diff()
+        if isinstance(macd_diff_raw, pd.DataFrame):
+            df['MACD_diff'] = macd_diff_raw.iloc[:, 0]
+        elif isinstance(macd_diff_raw, pd.Series):
+            df['MACD_diff'] = macd_diff_raw
+        elif isinstance(macd_diff_raw, np.ndarray):
+            df['MACD_diff'] = pd.Series(macd_diff_raw.flatten(), index=df.index)
+        else:
+            raise ValueError(f"Unexpected MACD_diff type: {type(macd_diff_raw)}")
         # Iteration 3 Fix: Ensures MACD output is always a 1D Series
         df['MACD'] = macd_raw.squeeze() if hasattr(macd_raw, 'squeeze') else macd_raw
         # Iteration 3 Fix: Ensures MACD_diff output is always a 1D Series
-        df['MACD_diff'] = MACD(df['Adj Close']).macd_diff().iloc[:, 0] if isinstance(MACD(df['Adj Close']).macd_diff(), pd.DataFrame) else MACD(df['Adj Close']).macd_diff()
         # Iteration 3 Fix: Ensures MACD_diff output is always a 1D Series
         df['MACD_diff'] = macd_diff_raw.squeeze() if hasattr(macd_diff_raw, 'squeeze') else macd_diff_raw
 
