@@ -1,5 +1,5 @@
-# HMM Strategy v12: Full Enhanced Version with Bug Fixes
-# Author: ChatGPT (for @rekria)
+# HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts, GCS Signal & Regime Tracking, and CSV Logging
+# Author: ChatGPT (on behalf of @rekria)
 
 import os
 import json
@@ -20,11 +20,24 @@ import feedparser
 from bs4 import BeautifulSoup
 from google.cloud import storage
 
+# ─── Config ──────────────────────────────────────────────────────────────
 ASSETS = {
-    'SPY': 'SPY', 'TSLA': 'TSLA', 'BYD': '1211.HK', 'GOLD': 'GC=F',
-    'DBS': 'D05.SI', 'AAPL': 'AAPL', 'MSFT': 'MSFT', 'GOOGL': 'GOOGL',
-    'AMZN': 'AMZN', 'NVDA': 'NVDA', 'META': 'META', 'NFLX': 'NFLX',
-    'ASML': 'ASML', 'TSM': 'TSM', 'BABA': 'BABA', 'BA': 'BA'
+    'SPY': 'SPY',
+    'TSLA': 'TSLA',
+    'BYD': '1211.HK',
+    'GOLD': 'GC=F',
+    'DBS': 'D05.SI',
+    'AAPL': 'AAPL',
+    'MSFT': 'MSFT',
+    'GOOGL': 'GOOGL',
+    'AMZN': 'AMZN',
+    'NVDA': 'NVDA',
+    'META': 'META',
+    'NFLX': 'NFLX',
+    'ASML': 'ASML',
+    'TSM': 'TSM',
+    'BABA': 'BABA',
+    'BA': 'BA'
 }
 START_DATE = '2017-01-01'
 END_DATE = None
@@ -43,6 +56,7 @@ GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
 BACKTEST_FILE = "backtest_summary.csv"
 
+# ─── GCS Utilities ───────────────────────────────────────────────────────
 def download_last_signals(file_name='last_signal.json'):
     try:
         client = storage.Client()
@@ -87,21 +101,24 @@ def upload_backtest_summary(df):
     except Exception as e:
         print(f"Error uploading backtest_summary.csv to GCS: {e}")
 
+# ─── Telegram ─────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Environment variable BOT_TOKEN not set")
 CHAT_ID  = os.getenv("CHAT_ID", "1669179604")
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
+# ─── Init ─────────────────────────────────────────────────────────────────
 sia = SentimentIntensityAnalyzer()
 last_signals = download_last_signals()
 summary = []
 
+# ─── Processing Loop ──────────────────────────────────────────────────────
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
-        df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
-        df['LogReturn'] = np.log(df['Close']).diff()
+        df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=False, progress=False)
+        df['LogReturn'] = np.log(df['Adj Close']).diff()
         df.dropna(inplace=True)
 
         titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
@@ -120,24 +137,22 @@ for name, ticker in ASSETS.items():
             pcr_val = 0.0
         df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-        macd = MACD(df['Close'])
-        df['MACD'] = macd.macd().squeeze()
-        df['MACD_diff'] = macd.macd_diff().squeeze()
-        df['RSI'] = RSIIndicator(df['Close']).rsi()
+        df['MACD'] = MACD(df['Adj Close']).macd().squeeze()
+        df['MACD_diff'] = MACD(df['Adj Close']).macd_diff().squeeze()
+        df['RSI'] = RSIIndicator(df['Adj Close']).rsi().squeeze()
         df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
 
+        missing = set(FEATURE_COLS) - set(df.columns)
+        if missing:
+            print(f"⚠️ Missing features for {ticker}: {missing}")
+            continue
         df.dropna(subset=FEATURE_COLS, inplace=True)
 
-    except Exception as e:
-        print(f"❌ Skipping {ticker} due to error: {e}")
-        continue
-
-    try:
         best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
         for scale_type in ['per-asset', 'global']:
             try:
                 scaler = StandardScaler()
-                X = scaler.fit_transform(df[['LogReturn']]) if scale_type == 'per-asset' else scaler.fit_transform(df[['LogReturn']].values.reshape(-1, 1))
+                X = scaler.fit_transform(df[['LogReturn']] if scale_type=='per-asset' else df[['LogReturn']].values.reshape(-1,1))
                 for n_states in STATE_RANGE:
                     model = GaussianHMM(n_components=n_states, covariance_type='diag', n_iter=200)
                     with warnings.catch_warnings():
@@ -148,13 +163,14 @@ for name, ticker in ASSETS.items():
                         best_model, best_bic = model, bic
                         scaler_type, best_states = scale_type, n_states
                 break
-            except:
-                continue
+            except Exception as e:
+                print(f"⚠️ {scale_type} scaling failed for {ticker}: {e}")
 
         if best_model is None:
             df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
             regime_seq = [-1, -1]
-            good_states, sharpe = [], pd.Series()
+            good_states = []
+            sharpe = pd.Series()
         else:
             hidden = best_model.predict(X)
             df['HiddenState'] = hidden
@@ -182,11 +198,11 @@ for name, ticker in ASSETS.items():
         curr_regime = regime_seq[-1] if regime_seq[-1] != -1 else None
 
         msg = (
-            f"📊 HMM v12 — {ticker}\n"
+            f"📊 HMM v12d — {ticker}\n"
             f"Prev→Curr Regime: {regime_seq[0]} → {regime_seq[1]}\n"
             f"Signal: {prev_signal} → {curr_signal}\n"
             f"Ratio: {ratio:.2f}×\n"
-            f"Price: ${df['Close'].iloc[-1]:.2f}\n"
+            f"Price: ${df['Adj Close'].iloc[-1]:.2f}\n"
             f"States: {best_states} ({scaler_type or 'hybrid'})"
         )
 
@@ -199,11 +215,14 @@ for name, ticker in ASSETS.items():
                 "Ticker": ticker,
                 "Signal": curr_signal,
                 "Regime": curr_regime,
-                "Price": round(df['Close'].iloc[-1], 2),
+                "Price": round(df['Adj Close'].iloc[-1], 2),
                 "PrevSignal": prev_signal,
                 "PrevRegime": regime_seq[0],
                 "Ratio": round(ratio, 4)
             })
+            print(f"✅ {ticker}: Alert sent ({curr_signal})")
+        else:
+            print(f"{ticker}: No signal/regime change ({curr_signal}, Regime {curr_regime})")
 
         summary.append({
             'Ticker': ticker,
@@ -219,8 +238,8 @@ for name, ticker in ASSETS.items():
 
     except Exception as e:
         print(f"❌ Skipping {ticker} due to error: {e}")
-        continue
 
+# ─── Save Backtest Summary ───────────────────────────────────────────────
 df_summary = pd.DataFrame(summary)
 upload_backtest_summary(df_summary)
 print("\n✅ Backtest summary uploaded to GCS")
