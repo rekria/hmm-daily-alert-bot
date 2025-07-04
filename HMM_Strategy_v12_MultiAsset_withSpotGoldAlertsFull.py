@@ -1,4 +1,4 @@
-# HMM Strategy v13: Optimized Convergence Parameters
+# HMM Strategy v13: Final Convergence Optimization
 import os
 import json
 import numpy as np
@@ -188,19 +188,18 @@ def download_asset_data(ticker, start_date, end_date, max_retries=3):
 
 # ─── Optimized HMM Training ───
 def train_hmm_model(X, n_states):
-    """Train HMM with optimized parameters for convergence"""
+    """Train HMM with final convergence optimization"""
     try:
         model = GaussianHMM(
             n_components=n_states,
             covariance_type='diag',
-            n_iter=300,          # Reduced iterations but with better init
-            tol=1e-4,             # Slightly looser tolerance
-            init_params='stmc',    # Initialize: s=startprob, t=transmat, m=means, c=covars
-            random_state=42
+            n_iter=500,           # Increased iterations
+            tol=1e-3,             # Looser tolerance (0.001)
+            init_params='stmc',    # Initialize all parameters
+            random_state=42,
+            verbose=False          # Disable verbose output
         )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model.fit(X)
+        model.fit(X)
         return model
     except Exception as e:
         print(f"⚠️ HMM training failed: {str(e)}")
@@ -292,7 +291,8 @@ for name, ticker in ASSETS.items():
                     best_model, best_bic = model, bic
                     best_states = n_states
             except Exception as e:
-                print(f"⚠️ HMM fitting failed for {n_states} states: {str(e)}")
+                # Non-fatal error, continue with next state
+                continue
 
         # ─── Position Determination ───
         if best_model is None:
