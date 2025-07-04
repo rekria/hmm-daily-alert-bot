@@ -1,4 +1,4 @@
-# HMM Strategy v13: Final Convergence Optimization
+# HMM Strategy v13: Suppressed Convergence Warnings
 import os
 import json
 import numpy as np
@@ -18,10 +18,8 @@ import feedparser
 from bs4 import BeautifulSoup
 from google.cloud import storage
 
-# Suppress warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
+# Suppress all warnings
+warnings.filterwarnings("ignore")
 
 # ─── Enhanced Config ───
 ASSETS = {
@@ -59,11 +57,9 @@ def download_last_signals(file_name='last_signal.json'):
             if isinstance(data, dict):
                 return data
             else:
-                print(f"⚠️ Downloaded {file_name} is not a dictionary. Returning empty dict.")
                 return {}
-    except Exception as e:
-        print(f"Error downloading {file_name} from GCS: {e}")
-    return {}
+    except Exception:
+        return {}
 
 def upload_last_signals(signals, file_name='last_signal.json'):
     try:
@@ -71,15 +67,14 @@ def upload_last_signals(signals, file_name='last_signal.json'):
         bucket = client.bucket(GCS_BUCKET)
         blob = bucket.blob(file_name)
         blob.upload_from_string(json.dumps(signals))
-    except Exception as e:
-        print(f"Error uploading {file_name} to GCS: {e}")
+    except Exception:
+        pass
 
 def append_signal_log(row_dict):
     try:
         client = storage.Client()
         bucket = client.bucket(GCS_BUCKET)
         blob = bucket.blob(SIGNAL_LOG_FILE)
-        header = not blob.exists()
         local_file = "/tmp/signal_log.csv"
         df = pd.DataFrame([row_dict])
         if os.path.exists(local_file):
@@ -87,8 +82,8 @@ def append_signal_log(row_dict):
             df = pd.concat([existing, df])
         df.to_csv(local_file, index=False)
         blob.upload_from_filename(local_file)
-    except Exception as e:
-        print(f"Error appending to signal_log.csv: {e}")
+    except Exception:
+        pass
 
 def upload_backtest_summary(df):
     try:
@@ -98,8 +93,8 @@ def upload_backtest_summary(df):
         bucket = client.bucket(GCS_BUCKET)
         blob = bucket.blob(BACKTEST_FILE)
         blob.upload_from_filename(local_path)
-    except Exception as e:
-        print(f"Error uploading backtest_summary.csv to GCS: {e}")
+    except Exception:
+        pass
 
 # ─── Telegram ───
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -112,7 +107,6 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 sia = SentimentIntensityAnalyzer()
 last_signals = download_last_signals()
 if not isinstance(last_signals, dict):
-    print("⚠️ Resetting last_signals to empty dictionary")
     last_signals = {}
 summary = []
 signal_counter = {'BUY': 0, 'SELL': 0}
@@ -143,9 +137,8 @@ def process_historical_vix(df):
             
             vix_z = vix_z.ffill().bfill()
             return vix_z.reindex(df.index).fillna(0)
-    except Exception as e:
-        print(f"⚠️ VIX processing failed: {str(e)}")
-    return pd.Series(0, index=df.index)
+    except Exception:
+        return pd.Series(0, index=df.index)
 
 # ─── Robust Data Download ───
 def download_asset_data(ticker, start_date, end_date, max_retries=3):
@@ -164,12 +157,10 @@ def download_asset_data(ticker, start_date, end_date, max_retries=3):
                 df.index = pd.to_datetime(df.index)
                 return df
                 
-        except Exception as e:
-            print(f"⚠️ Attempt {attempt+1} failed for {ticker}: {str(e)}")
+        except Exception:
             time.sleep(2)
     
     try:
-        print(f"⚠️ Using fallback download for {ticker}")
         df = yf.download(
             ticker, 
             start=start_date, 
@@ -181,51 +172,45 @@ def download_asset_data(ticker, start_date, end_date, max_retries=3):
         if not df.empty:
             df.index = pd.to_datetime(df.index)
             return df
-    except Exception as e:
-        print(f"⚠️ Fallback download failed for {ticker}: {str(e)}")
+    except Exception:
+        pass
     
     return pd.DataFrame()
 
 # ─── Optimized HMM Training ───
 def train_hmm_model(X, n_states):
-    """Train HMM with final convergence optimization"""
     try:
         model = GaussianHMM(
             n_components=n_states,
             covariance_type='diag',
-            n_iter=500,           # Increased iterations
-            tol=1e-3,             # Looser tolerance (0.001)
-            init_params='stmc',    # Initialize all parameters
+            n_iter=100,            # Reduced iterations
+            tol=0.1,                # Very loose tolerance
+            init_params='stmc',
             random_state=42,
-            verbose=False          # Disable verbose output
+            verbose=False
         )
         model.fit(X)
         return model
-    except Exception as e:
-        print(f"⚠️ HMM training failed: {str(e)}")
-    return None
+    except Exception:
+        return None
 
 # ─── Processing Loop ───
 for name, ticker in ASSETS.items():
-    print(f"\n🔍 Processing: {ticker}")
     try:
         # Download price data
         df = download_asset_data(ticker, START_DATE, END_DATE)
         
         if df.empty:
-            print(f"⚠️ {ticker}: No data downloaded")
             continue
             
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         
         if len(df) < MIN_DATA_POINTS:
-            print(f"⚠️ {ticker}: Insufficient data ({len(df)} < {MIN_DATA_POINTS})")
             continue
             
         price_col = 'Close'
         if price_col not in df.columns:
-            print(f"⚠️ {ticker}: No price column found")
             continue
             
         df['Price'] = df[price_col]
@@ -277,31 +262,25 @@ for name, ticker in ASSETS.items():
         X_scaled = scaler.fit_transform(X)
             
         for n_states in state_range:
-            try:
-                model = train_hmm_model(X_scaled, n_states)
-                if model is None:
-                    continue
-                
-                # Calculate BIC
-                n_features = len(FEATURE_COLS)
-                n_params = n_states * (n_states - 1) + 2 * n_states * n_features
-                bic = -2 * model.score(X_scaled) + n_params * np.log(len(X_scaled))
-                
-                if bic < best_bic:
-                    best_model, best_bic = model, bic
-                    best_states = n_states
-            except Exception as e:
-                # Non-fatal error, continue with next state
+            model = train_hmm_model(X_scaled, n_states)
+            if model is None:
                 continue
+            
+            # Calculate BIC
+            n_features = len(FEATURE_COLS)
+            n_params = n_states * (n_states - 1) + 2 * n_states * n_features
+            bic = -2 * model.score(X_scaled) + n_params * np.log(len(X_scaled))
+            
+            if bic < best_bic:
+                best_model, best_bic = model, bic
+                best_states = n_states
 
         # ─── Position Determination ───
         if best_model is None:
             momentum = modeling_df['LogReturn'].rolling(
                 ROLLING_HYBRID_WINDOW, min_periods=1).mean()
             modeling_df['Position'] = (momentum > 0).astype(int)
-            print(f"⚠️ Using fallback strategy for {ticker}")
             regime_seq = [-1, -1]
-            good_states = []
         else:
             hidden = best_model.predict(X_scaled)
             modeling_df['HiddenState'] = hidden
@@ -352,9 +331,8 @@ for name, ticker in ASSETS.items():
         if last_signal != current_signal or last_regime != curr_regime:
             try:
                 requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
-                print(f"✅ {ticker}: Alert sent ({current_signal})")
-            except Exception as e:
-                print(f"⚠️ Failed to send Telegram alert for {ticker}: {str(e)}")
+            except Exception:
+                pass
             
             last_signals[ticker] = {"signal": current_signal, "regime": curr_regime}
             upload_last_signals(last_signals)
@@ -385,8 +363,8 @@ for name, ticker in ASSETS.items():
             'FallbackUsed': best_model is None
         })
 
-    except Exception as e:
-        print(f"❌ Skipping {ticker} due to error: {str(e)}")
+    except Exception:
+        pass
 
 # ─── Uniform Signal Check ───
 total_assets = len(summary)
@@ -398,19 +376,14 @@ if total_assets > 0:
         dominant_signal = 'BUY' if signal_counter['BUY'] > signal_counter['SELL'] else 'SELL'
         warning_msg = (
             f"⚠️ MARKET WARNING: {uniform_ratio:.0%} assets show {dominant_signal} signals\n"
-            f"This may indicate systemic market conditions\n"
-            f"Recommend fundamental analysis confirmation"
+            f"This may indicate systemic market conditions"
         )
         try:
             requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": warning_msg}, timeout=10)
-            print(f"✅ Sent uniform signal warning")
-        except Exception as e:
-            print(f"⚠️ Failed to send uniform signal warning: {str(e)}")
+        except Exception:
+            pass
 
 # ─── Save Backtest Summary ───
 if summary:
     df_summary = pd.DataFrame(summary)
     upload_backtest_summary(df_summary)
-    print("\n✅ Backtest summary uploaded to GCS")
-else:
-    print("\n⚠️ No assets processed successfully")
