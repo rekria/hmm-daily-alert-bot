@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 import warnings
+import time  # Added for retry sleep
 from datetime import datetime, timedelta
 
 from hmmlearn.hmm import GaussianHMM
@@ -263,8 +264,8 @@ for name, ticker in ASSETS.items():
         # Fill any remaining NA values
         df.fillna(0, inplace=True)
         
-        # Use only recent data for modeling
-        modeling_df = df.iloc[-LOOKBACK:] if len(df) > LOOKBACK else df
+        # Use only recent data for modeling (with copy to avoid warnings)
+        modeling_df = df.iloc[-LOOKBACK:].copy() if len(df) > LOOKBACK else df.copy()
         
         # ─── HMM Model ───
         best_model, best_bic, best_states = None, np.inf, 0
@@ -283,7 +284,8 @@ for name, ticker in ASSETS.items():
                 model = GaussianHMM(
                     n_components=n_states,
                     covariance_type='diag',
-                    n_iter=200,
+                    n_iter=500,  # Increased iterations for convergence
+                    tol=1e-6,    # Tighter tolerance
                     random_state=42
                 )
                 with warnings.catch_warnings():
@@ -306,7 +308,7 @@ for name, ticker in ASSETS.items():
             # Robust fallback strategy
             momentum = modeling_df['LogReturn'].rolling(
                 ROLLING_HYBRID_WINDOW, min_periods=1).mean()
-            df['Position'] = (momentum > 0).astype(int)
+            modeling_df['Position'] = (momentum > 0).astype(int)
             print(f"⚠️ Using fallback strategy for {ticker}")
             regime_seq = [-1, -1]
             good_states = []
@@ -317,7 +319,7 @@ for name, ticker in ASSETS.items():
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)
             hidden = best_model.predict(X_scaled)
-            modeling_df['HiddenState'] = hidden
+            modeling_df['HiddenState'] = hidden  # Safe on copy
             
             # Calculate regime performance
             try:
@@ -335,11 +337,12 @@ for name, ticker in ASSETS.items():
             
             # Create position vector
             modeling_df['Position'] = modeling_df['HiddenState'].isin(good_states).astype(int)
-            df = df.join(modeling_df[['Position']], how='left')
-            df['Position'].ffill(inplace=True)
-            df['Position'].fillna(1, inplace=True)  # Default to buy
-            
             regime_seq = modeling_df['HiddenState'].iloc[-2:].values.tolist() if len(modeling_df) >= 2 else [-1, -1]
+
+        # Merge position back to main df
+        df = df.join(modeling_df[['Position']], how='left')
+        df['Position'].ffill(inplace=True)
+        df['Position'].fillna(1, inplace=True)  # Default to buy
 
         # ─── Signal Generation ───
         current_signal = "BUY" if df['Position'].iloc[-1] else "SELL"
