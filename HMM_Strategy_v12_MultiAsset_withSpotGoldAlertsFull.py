@@ -138,10 +138,10 @@ if missing:
     print(f"⚠️ Missing features for {ticker}: {missing}")
 
     # Only proceed with dropna if valid features are found
-valid_features = [col for col in FEATURE_COLS if col in df.columns]
-if not valid_features:
-    print(f"❌ Skipping {ticker} — no valid features available")
-    continue
+    valid_features = [col for col in FEATURE_COLS if col in df.columns]
+    if not valid_features:
+        print(f"❌ Skipping {ticker} — no valid features available")
+        continue
 
 df.dropna(subset=valid_features, inplace=True)
 
