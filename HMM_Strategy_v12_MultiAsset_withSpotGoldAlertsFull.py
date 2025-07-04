@@ -46,18 +46,60 @@ GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
 BACKTEST_FILE = "backtest_summary.csv"
 
-# ─── GCS Utilities (unchanged) ───
+# ─── GCS Utilities (fixed indentation) ───
 def download_last_signals(file_name='last_signal.json'):
-    # ... (unchanged) ...
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(file_name)
+        if blob.exists():
+            content = blob.download_as_text()
+            # Ensure we always get a dictionary
+            data = json.loads(content)
+            if isinstance(data, dict):
+                return data
+            else:
+                print(f"⚠️ Downloaded {file_name} is not a dictionary. Returning empty dict.")
+                return {}
+    except Exception as e:
+        print(f"Error downloading {file_name} from GCS: {e}")
+    return {}
 
 def upload_last_signals(signals, file_name='last_signal.json'):
-    # ... (unchanged) ...
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(file_name)
+        blob.upload_from_string(json.dumps(signals))
+    except Exception as e:
+        print(f"Error uploading {file_name} to GCS: {e}")
 
 def append_signal_log(row_dict):
-    # ... (unchanged) ...
+    try:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(SIGNAL_LOG_FILE)
+        header = not blob.exists()
+        local_file = "/tmp/signal_log.csv"
+        df = pd.DataFrame([row_dict])
+        if os.path.exists(local_file):
+            existing = pd.read_csv(local_file)
+            df = pd.concat([existing, df])
+        df.to_csv(local_file, index=False)
+        blob.upload_from_filename(local_file)
+    except Exception as e:
+        print(f"Error appending to signal_log.csv: {e}")
 
 def upload_backtest_summary(df):
-    # ... (unchanged) ...
+    try:
+        local_path = "/tmp/backtest_summary.csv"
+        df.to_csv(local_path, index=False)
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(BACKTEST_FILE)
+        blob.upload_from_filename(local_path)
+    except Exception as e:
+        print(f"Error uploading backtest_summary.csv to GCS: {e}")
 
 # ─── Telegram ───
 BOT_TOKEN = os.getenv("BOT_TOKEN")
