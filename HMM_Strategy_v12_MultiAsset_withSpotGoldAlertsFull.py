@@ -102,7 +102,8 @@ summary = []
 
 # ─── Processing Loop ──────────────────────────────────────────────────────
 for name, ticker in ASSETS.items():
-    print(f"\n🔍 Processing: {ticker}")
+    print(f"
+🔍 Processing: {ticker}")
     try:
         df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
         df['LogReturn'] = np.log(df['Close']).diff()
@@ -132,18 +133,17 @@ for name, ticker in ASSETS.items():
     df['MACD_diff'] = MACD(close_series).macd_diff()
     df['RSI'] = RSIIndicator(close_series).rsi()
     df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
-    valid_features = [col for col in FEATURE_COLS if col in df.columns]
-missing = set(FEATURE_COLS) - set(df.columns)
-if missing:
-    print(f"⚠️ Missing features for {ticker}: {missing}")
 
-    # Only proceed with dropna if valid features are found
+    missing = set(FEATURE_COLS) - set(df.columns)
+    if missing:
+        print(f"⚠️ Missing features for {ticker}: {missing}")
+
     valid_features = [col for col in FEATURE_COLS if col in df.columns]
     if not valid_features:
         print(f"❌ Skipping {ticker} — no valid features available")
         continue
 
-df.dropna(subset=valid_features, inplace=True)
+    df.dropna(subset=valid_features, inplace=True)
 
     # Proceed only if there are enough valid features
 if valid_features:
