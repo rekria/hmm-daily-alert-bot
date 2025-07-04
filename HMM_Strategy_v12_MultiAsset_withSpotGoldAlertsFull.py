@@ -1,8 +1,6 @@
-# Iteration 3: Fixed MACD and MACD_diff assignments using .iloc[:, 0] conditional extraction
-# Resolves 'Data must be 1-dimensional' errors caused by shape mismatch from ta library outputs
-# HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts, GCS Signal & Regime Tracking, and CSV Logging
+# HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts, GCS Signal & Regime Tracking
 # Author: ChatGPT (on behalf of @rekria)
-# Fix Iteration 2: Ensure MACD outputs are 1D to prevent ndarray shape errors
+# Iteration 4: Comprehensive fix for dimensionality issues and yFinance warnings
 
 import os
 import json
@@ -10,7 +8,6 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import requests
-import joblib
 import warnings
 from datetime import datetime
 
@@ -22,6 +19,9 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import feedparser
 from bs4 import BeautifulSoup
 from google.cloud import storage
+
+# Suppress yFinance warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="yfinance")
 
 # ─── Config ───
 ASSETS = {
@@ -106,71 +106,81 @@ summary = []
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
+        # Download data with explicit auto_adjust=False
         df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=False, progress=False)
         df['LogReturn'] = np.log(df['Adj Close']).diff()
-        df.dropna(inplace=True)
+        df.dropna(subset=['LogReturn'], inplace=True)
 
+        # News sentiment (single value for whole dataset)
         titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
-        df['NewsSentiment'] = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
+        avg_sentiment = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
+        df['NewsSentiment'] = avg_sentiment
 
-        vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), progress=False)
+        # VIX volatility index
+        vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), auto_adjust=False, progress=False)
         vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
-        df['VIX'] = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std()).reindex(df.index).fillna(0)
+        vix_z = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std())
+        df['VIX'] = vix_z.reindex(df.index).fillna(0)
 
+        # PCR (Put/Call Ratio)
         try:
-            pcr_resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options', headers={'User-Agent':'Mozilla/5.0'})
+            pcr_resp = requests.get(
+                'https://finance.yahoo.com/quote/%5EPCR/options', 
+                headers={'User-Agent': 'Mozilla/5.0'},
+                timeout=10
+            )
             pcr_soup = BeautifulSoup(pcr_resp.text, 'html.parser')
             el = pcr_soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
             pcr_val = float(el.text) if el and el.text.strip() else 0.0
-        except:
+        except Exception:
             pcr_val = 0.0
         df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-        # [Fix Iteration 1] Ensure MACD and MACD_diff outputs are 1D
-        # Iteration 3 Fix: ensure MACD outputs are always 1D series
-        # Iteration 3 Fix: Ensures MACD output is always a 1D Series
-        # Iteration 4 Fix: Explicitly handle MACD output type (DataFrame, Series, ndarray)
-        macd_raw = MACD(df['Adj Close']).macd()
-        if isinstance(macd_raw, pd.DataFrame):
-            df['MACD'] = macd_raw.iloc[:, 0]
-        elif isinstance(macd_raw, pd.Series):
-            df['MACD'] = macd_raw
-        elif isinstance(macd_raw, np.ndarray):
-            df['MACD'] = pd.Series(macd_raw.flatten(), index=df.index)
-        else:
-            raise ValueError(f"Unexpected MACD type: {type(macd_raw)}")
+        # ─── Technical Indicators ───
+        # Robust 1D conversion for all indicators
+        def ensure_1d(series, default_val=0):
+            """Convert any array-like to 1D with NaN handling"""
+            if series is None:
+                return pd.Series([default_val] * len(df), index=df.index)
+            return pd.Series(np.ravel(series), index=df.index)
+        
+        # MACD with robust 1D conversion
+        macd_calc = MACD(df['Adj Close'])
+        df['MACD'] = ensure_1d(macd_calc.macd())
+        df['MACD_diff'] = ensure_1d(macd_calc.macd_diff())
+        
+        # RSI with robust 1D conversion
+        rsi_calc = RSIIndicator(df['Adj Close'])
+        df['RSI'] = ensure_1d(rsi_calc.rsi())
+        
+        # Volume Z-Score
+        vol_mean = df['Volume'].rolling(20).mean()
+        vol_std = df['Volume'].rolling(20).std()
+        df['Volume_Z'] = ((df['Volume'] - vol_mean) / vol_std).fillna(0)
 
-        macd_diff_raw = MACD(df['Adj Close']).macd_diff()
-        if isinstance(macd_diff_raw, pd.DataFrame):
-            df['MACD_diff'] = macd_diff_raw.iloc[:, 0]
-        elif isinstance(macd_diff_raw, pd.Series):
-            df['MACD_diff'] = macd_diff_raw
-        elif isinstance(macd_diff_raw, np.ndarray):
-            df['MACD_diff'] = pd.Series(macd_diff_raw.flatten(), index=df.index)
-        else:
-            raise ValueError(f"Unexpected MACD_diff type: {type(macd_diff_raw)}")
-        # Iteration 3 Fix: Ensures MACD output is always a 1D Series
-        df['MACD'] = macd_raw.squeeze() if hasattr(macd_raw, 'squeeze') else macd_raw
-        # Iteration 3 Fix: Ensures MACD_diff output is always a 1D Series
-        # Iteration 3 Fix: Ensures MACD_diff output is always a 1D Series
-        df['MACD_diff'] = macd_diff_raw.squeeze() if hasattr(macd_diff_raw, 'squeeze') else macd_diff_raw
-
-        df['RSI'] = RSIIndicator(df['Adj Close']).rsi().squeeze()
-        df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
-
+        # Check for missing features
         missing = set(FEATURE_COLS) - set(df.columns)
         if missing:
             print(f"⚠️ Missing features for {ticker}: {missing}")
             continue
         df.dropna(subset=FEATURE_COLS, inplace=True)
 
+        # ─── HMM Model ───
         best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
         for scale_type in ['per-asset', 'global']:
             try:
                 scaler = StandardScaler()
-                X = scaler.fit_transform(df[['LogReturn']] if scale_type=='per-asset' else df[['LogReturn']].values.reshape(-1,1))
+                if scale_type == 'per-asset':
+                    X = scaler.fit_transform(df[['LogReturn']])
+                else:  # global scaling
+                    X = scaler.fit_transform(df[['LogReturn']].values.reshape(-1, 1))
+                
                 for n_states in STATE_RANGE:
-                    model = GaussianHMM(n_components=n_states, covariance_type='diag', n_iter=200)
+                    model = GaussianHMM(
+                        n_components=n_states,
+                        covariance_type='diag',
+                        n_iter=200
+                    )
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
                         model.fit(X)
@@ -178,11 +188,13 @@ for name, ticker in ASSETS.items():
                     if bic < best_bic:
                         best_model, best_bic = model, bic
                         scaler_type, best_states = scale_type, n_states
-                break
+                break  # Break if successful
             except Exception as e:
                 print(f"⚠️ {scale_type} scaling failed for {ticker}: {e}")
 
+        # ─── Position Determination ───
         if best_model is None:
+            # Fallback to simple momentum strategy
             df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
             regime_seq = [-1, -1]
             good_states = []
@@ -190,21 +202,35 @@ for name, ticker in ASSETS.items():
         else:
             hidden = best_model.predict(X)
             df['HiddenState'] = hidden
+            
+            # Calculate regime Sharpe ratios
             sharpe = df.groupby('HiddenState')['LogReturn'].mean() / df.groupby('HiddenState')['LogReturn'].std()
             durations = df.groupby('HiddenState').size()
-            good_states = sharpe[(sharpe > SHARPE_THRESHOLD) & (durations > DURATION_THRESHOLD)].index.tolist()
+            
+            # Identify good regimes
+            good_states = sharpe[
+                (sharpe > SHARPE_THRESHOLD) & 
+                (durations > DURATION_THRESHOLD)
+            ].index.tolist()
+            
             if not good_states:
                 good_states = [sharpe.idxmax()]
+            
             df['Position'] = df['HiddenState'].isin(good_states).astype(int)
+            
+            # Fallback if no positions
             if df['Position'].sum() == 0:
                 df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
+            
             regime_seq = df['HiddenState'].iloc[-2:].tolist()
 
+        # ─── Performance Calculation ───
         df['StrategyReturn'] = df['LogReturn'] * df['Position']
-        cumM = np.exp(df['LogReturn'].cumsum()).iloc[-1]
-        cumH = np.exp(df['StrategyReturn'].cumsum()).iloc[-1]
+        cumM = np.exp(df['LogReturn'].cumsum()).iloc[-1]  # Market return
+        cumH = np.exp(df['StrategyReturn'].cumsum()).iloc[-1]  # Strategy return
         ratio = cumH / cumM if cumM else 1.0
 
+        # ─── Signal Generation ───
         tail = df.iloc[-2:]
         prev_signal = "BUY" if tail['Position'].iloc[-2] else "SELL"
         curr_signal = "BUY" if tail['Position'].iloc[-1] else "SELL"
@@ -213,6 +239,7 @@ for name, ticker in ASSETS.items():
         last_regime = last_data.get("regime", -999)
         curr_regime = regime_seq[-1] if regime_seq[-1] != -1 else None
 
+        # ─── Telegram Alert ───
         msg = (
             f"📊 HMM v12d — {ticker}\n"
             f"Prev→Curr Regime: {regime_seq[0]} → {regime_seq[1]}\n"
@@ -240,6 +267,7 @@ for name, ticker in ASSETS.items():
         else:
             print(f"{ticker}: No signal/regime change ({curr_signal}, Regime {curr_regime})")
 
+        # ─── Summary Stats ───
         summary.append({
             'Ticker': ticker,
             'BuyHoldReturn': round(cumM, 4),
@@ -253,9 +281,12 @@ for name, ticker in ASSETS.items():
         })
 
     except Exception as e:
-        print(f"❌ Skipping {ticker} due to error: {e}")
+        print(f"❌ Skipping {ticker} due to error: {str(e)[:200]}")
 
 # ─── Save Backtest Summary ───
-df_summary = pd.DataFrame(summary)
-upload_backtest_summary(df_summary)
-print("\n✅ Backtest summary uploaded to GCS")
+if summary:
+    df_summary = pd.DataFrame(summary)
+    upload_backtest_summary(df_summary)
+    print("\n✅ Backtest summary uploaded to GCS")
+else:
+    print("\n⚠️ No assets processed successfully")
