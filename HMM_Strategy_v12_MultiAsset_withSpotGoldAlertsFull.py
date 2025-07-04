@@ -29,7 +29,7 @@ ASSETS = {
     'META': 'META', 'NFLX': 'NFLX', 'ASML': 'ASML', 'TSM': 'TSM', 'BABA': 'BABA', 'BA': 'BA'
 }
 START_DATE = '2012-01-01'  # Extended history
-END_DATE = None
+END_DATE = datetime.now().strftime('%Y-%m-%d')  # Explicit end date
 MIN_DATA_POINTS = 250      # Minimum data points required
 MAX_STATES = 5             # Reduced complexity
 SHARPE_THRESHOLD = 0.1
@@ -46,7 +46,7 @@ GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
 BACKTEST_FILE = "backtest_summary.csv"
 
-# ─── GCS Utilities (fixed indentation) ───
+# ─── GCS Utilities ───
 def download_last_signals(file_name='last_signal.json'):
     try:
         client = storage.Client()
@@ -152,20 +152,61 @@ def process_historical_vix(df):
         print(f"⚠️ VIX processing failed: {str(e)}")
     return pd.Series(0, index=df.index)
 
+# ─── Robust Data Download ───
+def download_asset_data(ticker, start_date, end_date, max_retries=3):
+    """Robust data download with retry mechanism"""
+    for attempt in range(max_retries):
+        try:
+            # Try using Ticker API which handles symbol changes better
+            asset = yf.Ticker(ticker)
+            df = asset.history(
+                start=start_date, 
+                end=end_date, 
+                auto_adjust=True,  # Get adjusted prices
+                actions=False,     # Exclude dividends/splits
+                timeout=30
+            )
+            
+            if not df.empty:
+                # Ensure we have date index
+                df.index = pd.to_datetime(df.index)
+                return df
+                
+        except Exception as e:
+            print(f"⚠️ Attempt {attempt+1} failed for {ticker}: {str(e)}")
+            time.sleep(2)  # Wait before retrying
+    
+    # Fallback to direct download
+    try:
+        print(f"⚠️ Using fallback download for {ticker}")
+        df = yf.download(
+            ticker, 
+            start=start_date, 
+            end=end_date, 
+            auto_adjust=True, 
+            progress=False,
+            timeout=60
+        )
+        if not df.empty:
+            df.index = pd.to_datetime(df.index)
+            return df
+    except Exception as e:
+        print(f"⚠️ Fallback download failed for {ticker}: {str(e)}")
+    
+    return pd.DataFrame()
+
 # ─── Processing Loop ───
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
-        # Download price data
-        df = yf.download(
-            ticker, 
-            start=START_DATE, 
-            end=END_DATE, 
-            auto_adjust=False, 
-            progress=False,
-            timeout=60
-        )
+        # Download price data with robust method
+        df = download_asset_data(ticker, START_DATE, END_DATE)
         
+        # Check if we got valid data
+        if df.empty:
+            print(f"⚠️ {ticker}: No data downloaded")
+            continue
+            
         # Simplify multi-index columns to single level
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -173,10 +214,11 @@ for name, ticker in ASSETS.items():
         # Check data sufficiency
         if len(df) < MIN_DATA_POINTS:
             print(f"⚠️ {ticker}: Insufficient data ({len(df)} < {MIN_DATA_POINTS})")
+            print(f"First date: {df.index.min()}, Last date: {df.index.max()}")
             continue
             
         # Ensure we have a valid price column
-        price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
+        price_col = 'Close'  # Since we used auto_adjust=True
         if price_col not in df.columns:
             print(f"⚠️ {ticker}: No price column found")
             continue
