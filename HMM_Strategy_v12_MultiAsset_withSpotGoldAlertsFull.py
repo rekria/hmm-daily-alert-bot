@@ -137,8 +137,8 @@ for name, ticker in ASSETS.items():
             pcr_val = 0.0
         df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-        df['MACD'] = MACD(df['Adj Close']).macd().squeeze()
-        df['MACD_diff'] = MACD(df['Adj Close']).macd_diff().squeeze()
+        df['MACD'] = MACD(df['Adj Close']).macd().iloc[:, 0] if isinstance(MACD(df['Adj Close']).macd(), pd.DataFrame) else MACD(df['Adj Close']).macd()
+        df['MACD_diff'] = MACD(df['Adj Close']).macd_diff().iloc[:, 0] if isinstance(MACD(df['Adj Close']).macd_diff(), pd.DataFrame) else MACD(df['Adj Close']).macd_diff()
         df['RSI'] = RSIIndicator(df['Adj Close']).rsi().squeeze()
         df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
 
