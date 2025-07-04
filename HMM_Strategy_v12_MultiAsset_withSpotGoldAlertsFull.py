@@ -1,6 +1,6 @@
 # HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts, GCS Signal & Regime Tracking, and CSV Logging
 # Author: ChatGPT (on behalf of @rekria)
-# Fix Iteration 1: Ensure MACD outputs are 1D to prevent ndarray shape errors
+# Fix Iteration 2: Ensure MACD outputs are 1D to prevent ndarray shape errors
 
 import os
 import json
