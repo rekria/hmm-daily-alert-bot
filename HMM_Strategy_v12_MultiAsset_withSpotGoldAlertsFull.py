@@ -1,5 +1,5 @@
-# HMM Strategy v12d: Final Robust Version with Full Enhancements Retained
-# Author: ChatGPT (for @rekria)
+# HMM Strategy v12d: Robust Multi-Asset Model with Telegram Alerts and GCS Logging
+# Author: ChatGPT (on behalf of @rekria)
 
 import os
 import json
@@ -32,18 +32,15 @@ STATE_RANGE = range(2, 30)
 SHARPE_THRESHOLD = 0.1
 DURATION_THRESHOLD = 10
 ROLLING_HYBRID_WINDOW = 10
-LOOKBACK = 60
 
-FEATURE_COLS = ['LogReturn', 'MACD', 'MACD_diff', 'RSI', 'NewsSentiment', 'VIX', 'PCR', 'Volume_Z']
+FEATURE_COLS = [
+    'LogReturn', 'MACD', 'MACD_diff', 'RSI',
+    'NewsSentiment', 'VIX', 'PCR', 'Volume_Z'
+]
+
 GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
 BACKTEST_FILE = "backtest_summary.csv"
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("Environment variable BOT_TOKEN not set")
-CHAT_ID  = os.getenv("CHAT_ID", "1669179604")
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 # ─── GCS Utilities ───────────────────────────────────────────────────────
 def download_last_signals(file_name='last_signal.json'):
@@ -90,6 +87,13 @@ def upload_backtest_summary(df):
     except Exception as e:
         print(f"Error uploading backtest_summary.csv to GCS: {e}")
 
+# ─── Telegram ─────────────────────────────────────────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Environment variable BOT_TOKEN not set")
+CHAT_ID  = os.getenv("CHAT_ID", "1669179604")
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
 # ─── Init ─────────────────────────────────────────────────────────────────
 sia = SentimentIntensityAnalyzer()
 last_signals = download_last_signals()
@@ -100,14 +104,21 @@ for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
         df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
+        if df.empty or 'Close' not in df.columns:
+            print(f"⚠️ No valid data for {ticker}, skipping.")
+            continue
+
         df['LogReturn'] = np.log(df['Close']).diff()
-        df.dropna(inplace=True)
 
         titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
         df['NewsSentiment'] = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
 
-        vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), auto_adjust=True, progress=False)
-        df['VIX'] = ((vix['Close'] - vix['Close'].rolling(20).mean()) / vix['Close'].rolling(20).std()).reindex(df.index).fillna(0)
+        vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), progress=False)
+        if 'Close' in vix:
+            vix_close = vix['Close']
+            df['VIX'] = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std()).reindex(df.index).fillna(0)
+        else:
+            df['VIX'] = 0.0
 
         try:
             pcr_resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options', headers={'User-Agent':'Mozilla/5.0'})
@@ -118,17 +129,27 @@ for name, ticker in ASSETS.items():
             pcr_val = 0.0
         df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-        df['MACD'] = MACD(df['Close']).macd().squeeze()
-        df['MACD_diff'] = MACD(df['Close']).macd_diff().squeeze()
-        df['RSI'] = RSIIndicator(df['Close']).rsi().squeeze()
+        macd = MACD(df['Close'])
+        df['MACD'] = macd.macd().squeeze()
+        df['MACD_diff'] = macd.macd_diff().squeeze()
+
+        rsi = RSIIndicator(df['Close'])
+        df['RSI'] = rsi.rsi().squeeze()
+
         df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
+
+        missing = set(FEATURE_COLS) - set(df.columns)
+        if missing:
+            print(f"⚠️ Missing features for {ticker}: {missing}")
+            continue
+
         df.dropna(subset=FEATURE_COLS, inplace=True)
 
         best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
         for scale_type in ['per-asset', 'global']:
             try:
                 scaler = StandardScaler()
-                X = scaler.fit_transform(df[['LogReturn']] if scale_type=='per-asset' else df[['LogReturn']].values.reshape(-1,1))
+                X = scaler.fit_transform(df[['LogReturn']])
                 for n_states in STATE_RANGE:
                     model = GaussianHMM(n_components=n_states, covariance_type='diag', n_iter=200)
                     with warnings.catch_warnings():
@@ -214,8 +235,7 @@ for name, ticker in ASSETS.items():
 
     except Exception as e:
         print(f"❌ Skipping {ticker} due to error: {e}")
+        continue
 
-# ─── Save Backtest Summary ───────────────────────────────────────────────
-df_summary = pd.DataFrame(summary)
-upload_backtest_summary(df_summary)
+upload_backtest_summary(pd.DataFrame(summary))
 print("\n✅ Backtest summary uploaded to GCS")
