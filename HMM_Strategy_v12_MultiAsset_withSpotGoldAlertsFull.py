@@ -1,5 +1,6 @@
 # HMM Strategy v12d: Enhanced Hybrid Model with Telegram Alerts
-# Final Fix: Handle yfinance multi-index columns
+# Final Version: Properly handles yfinance column names
+# Author: ChatGPT (on behalf of @rekria)
 
 import os
 import json
@@ -110,7 +111,7 @@ summary = []
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
-        # Download price data with robust error handling
+        # Download price data
         df = yf.download(
             ticker, 
             start=START_DATE, 
@@ -120,24 +121,30 @@ for name, ticker in ASSETS.items():
             timeout=60
         )
         
-        # Fix multi-index columns
+        # Simplify multi-index columns to single level
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [' '.join(col).strip() for col in df.columns.values]
+            df.columns = df.columns.get_level_values(0)
         
         # Check if we got valid price data
         if df.empty:
             print(f"⚠️ {ticker}: No data downloaded")
             continue
             
+        # Print available columns for debugging
+        print(f"Available columns: {list(df.columns)}")
+            
         # Ensure we have a valid price column to use
-        price_col = 'Close'
-        if 'Adj Close' in df.columns:
-            price_col = 'Adj Close'
-        elif 'Close' not in df.columns:
+        price_col = None
+        for col in ['Adj Close', 'Close']:
+            if col in df.columns:
+                price_col = col
+                break
+                
+        if not price_col:
             print(f"⚠️ {ticker}: No price column found")
             continue
             
-        # Use the best available price column
+        print(f"Using price column: {price_col}")
         df['Price'] = df[price_col]
         
         # Check for NaN values in price
@@ -181,9 +188,9 @@ for name, ticker in ASSETS.items():
                 timeout=60
             )
             if not vix.empty:
-                # Fix multi-index if needed
+                # Simplify multi-index if needed
                 if isinstance(vix.columns, pd.MultiIndex):
-                    vix.columns = [' '.join(col).strip() for col in vix.columns.values]
+                    vix.columns = vix.columns.get_level_values(0)
                     
                 vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
                 vix_z = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std())
