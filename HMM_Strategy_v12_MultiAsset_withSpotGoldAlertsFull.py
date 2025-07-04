@@ -102,128 +102,118 @@ for name, ticker in ASSETS.items():
         df = yf.download(ticker, start=START_DATE, end=END_DATE, auto_adjust=True, progress=False)
         df['LogReturn'] = np.log(df['Close']).diff()
         df.dropna(inplace=True)
-    except Exception as e:
-        print(f"⚠️ Data download failed for {ticker}: {e}")
-        continue
 
-    titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
-    df['NewsSentiment'] = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
+        titles = [e.title for e in feedparser.parse('https://finance.yahoo.com/news/rss').entries]
+        df['NewsSentiment'] = np.mean([sia.polarity_scores(t)['compound'] for t in titles]) if titles else 0.0
 
-    try:
         vix = yf.download('^VIX', start=df.index.min(), end=df.index.max(), auto_adjust=True, progress=False)
-        vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
-        df['VIX'] = ((vix_close - vix_close.rolling(20).mean()) / vix_close.rolling(20).std()).reindex(df.index).fillna(0)
-    except:
-        df['VIX'] = 0.0
+        df['VIX'] = ((vix['Close'] - vix['Close'].rolling(20).mean()) / vix['Close'].rolling(20).std()).reindex(df.index).fillna(0)
 
-    try:
-        pcr_resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options', headers={'User-Agent':'Mozilla/5.0'})
-        pcr_soup = BeautifulSoup(pcr_resp.text, 'html.parser')
-        el = pcr_soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
-        pcr_val = float(el.text) if el and el.text.strip() else 0.0
-    except:
-        pcr_val = 0.0
-    df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
-
-    df['MACD'] = MACD(df['Close']).macd()
-    df['MACD_diff'] = MACD(df['Close']).macd_diff()
-    df['RSI'] = RSIIndicator(df['Close']).rsi()
-    df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
-
-    try:
-        df.dropna(subset=FEATURE_COLS, inplace=True)
-    except KeyError as e:
-        print(f"⚠️ Skipping {ticker} — missing feature columns: {e}")
-        continue
-
-    best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
-    for scale_type in ['per-asset', 'global']:
         try:
-            scaler = StandardScaler()
-            X = scaler.fit_transform(df[['LogReturn']] if scale_type=='per-asset' else df[['LogReturn']].values.reshape(-1,1))
-            for n_states in STATE_RANGE:
-                model = GaussianHMM(n_components=n_states, covariance_type='diag', n_iter=200)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    model.fit(X)
-                bic = -2 * model.score(X) + n_states * np.log(len(X))
-                if bic < best_bic:
-                    best_model, best_bic = model, bic
-                    scaler_type, best_states = scale_type, n_states
-            break
-        except Exception as e:
-            print(f"⚠️ {scale_type} scaling failed for {ticker}: {e}")
+            pcr_resp = requests.get('https://finance.yahoo.com/quote/%5EPCR/options', headers={'User-Agent':'Mozilla/5.0'})
+            pcr_soup = BeautifulSoup(pcr_resp.text, 'html.parser')
+            el = pcr_soup.select_one("td[data-test='PUT_CALL_RATIO-value']")
+            pcr_val = float(el.text) if el and el.text.strip() else 0.0
+        except:
+            pcr_val = 0.0
+        df['PCR'] = ((pcr_val - df['LogReturn'].rolling(20).mean()) / df['LogReturn'].rolling(20).std()).fillna(0)
 
-    if best_model is None:
-        print(f"❌ HMM failed — using hybrid fallback for {ticker}")
-        df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
-        regime_seq = [-1, -1]
-        good_states = []
-        sharpe = pd.Series()
-    else:
-        hidden = best_model.predict(X)
-        df['HiddenState'] = hidden
-        sharpe = df.groupby('HiddenState')['LogReturn'].mean() / df.groupby('HiddenState')['LogReturn'].std()
-        durations = df.groupby('HiddenState').size()
-        good_states = sharpe[(sharpe > SHARPE_THRESHOLD) & (durations > DURATION_THRESHOLD)].index.tolist()
-        if not good_states:
-            good_states = [sharpe.idxmax()]
-        df['Position'] = df['HiddenState'].isin(good_states).astype(int)
-        if df['Position'].sum() == 0:
+        df['MACD'] = MACD(df['Close']).macd().squeeze()
+        df['MACD_diff'] = MACD(df['Close']).macd_diff().squeeze()
+        df['RSI'] = RSIIndicator(df['Close']).rsi().squeeze()
+        df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
+        df.dropna(subset=FEATURE_COLS, inplace=True)
+
+        best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
+        for scale_type in ['per-asset', 'global']:
+            try:
+                scaler = StandardScaler()
+                X = scaler.fit_transform(df[['LogReturn']] if scale_type=='per-asset' else df[['LogReturn']].values.reshape(-1,1))
+                for n_states in STATE_RANGE:
+                    model = GaussianHMM(n_components=n_states, covariance_type='diag', n_iter=200)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        model.fit(X)
+                    bic = -2 * model.score(X) + n_states * np.log(len(X))
+                    if bic < best_bic:
+                        best_model, best_bic = model, bic
+                        scaler_type, best_states = scale_type, n_states
+                break
+            except Exception as e:
+                print(f"⚠️ {scale_type} scaling failed for {ticker}: {e}")
+
+        if best_model is None:
             df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
-        regime_seq = df['HiddenState'].iloc[-2:].tolist()
+            regime_seq = [-1, -1]
+            good_states = []
+            sharpe = pd.Series()
+        else:
+            hidden = best_model.predict(X)
+            df['HiddenState'] = hidden
+            sharpe = df.groupby('HiddenState')['LogReturn'].mean() / df.groupby('HiddenState')['LogReturn'].std()
+            durations = df.groupby('HiddenState').size()
+            good_states = sharpe[(sharpe > SHARPE_THRESHOLD) & (durations > DURATION_THRESHOLD)].index.tolist()
+            if not good_states:
+                good_states = [sharpe.idxmax()]
+            df['Position'] = df['HiddenState'].isin(good_states).astype(int)
+            if df['Position'].sum() == 0:
+                df['Position'] = (df['LogReturn'].rolling(ROLLING_HYBRID_WINDOW).mean().iloc[-1] > 0).astype(int)
+            regime_seq = df['HiddenState'].iloc[-2:].tolist()
 
-    df['StrategyReturn'] = df['LogReturn'] * df['Position']
-    cumM = np.exp(df['LogReturn'].cumsum()).iloc[-1]
-    cumH = np.exp(df['StrategyReturn'].cumsum()).iloc[-1]
-    ratio = cumH / cumM if cumM else 1.0
+        df['StrategyReturn'] = df['LogReturn'] * df['Position']
+        cumM = np.exp(df['LogReturn'].cumsum()).iloc[-1]
+        cumH = np.exp(df['StrategyReturn'].cumsum()).iloc[-1]
+        ratio = cumH / cumM if cumM else 1.0
 
-    tail = df.iloc[-2:]
-    prev_signal = "BUY" if tail['Position'].iloc[-2] else "SELL"
-    curr_signal = "BUY" if tail['Position'].iloc[-1] else "SELL"
-    last_data = last_signals.get(ticker, {})
-    last_signal = last_data.get("signal")
-    last_regime = last_data.get("regime", -999)
-    curr_regime = regime_seq[-1] if regime_seq[-1] != -1 else None
+        tail = df.iloc[-2:]
+        prev_signal = "BUY" if tail['Position'].iloc[-2] else "SELL"
+        curr_signal = "BUY" if tail['Position'].iloc[-1] else "SELL"
+        last_data = last_signals.get(ticker, {})
+        last_signal = last_data.get("signal")
+        last_regime = last_data.get("regime", -999)
+        curr_regime = regime_seq[-1] if regime_seq[-1] != -1 else None
 
-    msg = (
-        f"📊 HMM v12d — {ticker}\n"
-        f"Prev→Curr Regime: {regime_seq[0]} → {regime_seq[1]}\n"
-        f"Signal: {prev_signal} → {curr_signal}\n"
-        f"Ratio: {ratio:.2f}×\n"
-        f"Price: ${df['Close'].iloc[-1]:.2f}\n"
-        f"States: {best_states} ({scaler_type or 'hybrid'})"
-    )
+        msg = (
+            f"📊 HMM v12d — {ticker}\n"
+            f"Prev→Curr Regime: {regime_seq[0]} → {regime_seq[1]}\n"
+            f"Signal: {prev_signal} → {curr_signal}\n"
+            f"Ratio: {ratio:.2f}×\n"
+            f"Price: ${df['Close'].iloc[-1]:.2f}\n"
+            f"States: {best_states} ({scaler_type or 'hybrid'})"
+        )
 
-    if last_signal != curr_signal or last_regime != curr_regime:
-        requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
-        last_signals[ticker] = {"signal": curr_signal, "regime": curr_regime}
-        upload_last_signals(last_signals)
-        append_signal_log({
-            "Date": datetime.now().strftime("%Y-%m-%d"),
-            "Ticker": ticker,
-            "Signal": curr_signal,
-            "Regime": curr_regime,
-            "Price": round(df['Close'].iloc[-1], 2),
-            "PrevSignal": prev_signal,
-            "PrevRegime": regime_seq[0],
-            "Ratio": round(ratio, 4)
+        if last_signal != curr_signal or last_regime != curr_regime:
+            requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": msg})
+            last_signals[ticker] = {"signal": curr_signal, "regime": curr_regime}
+            upload_last_signals(last_signals)
+            append_signal_log({
+                "Date": datetime.now().strftime("%Y-%m-%d"),
+                "Ticker": ticker,
+                "Signal": curr_signal,
+                "Regime": curr_regime,
+                "Price": round(df['Close'].iloc[-1], 2),
+                "PrevSignal": prev_signal,
+                "PrevRegime": regime_seq[0],
+                "Ratio": round(ratio, 4)
+            })
+            print(f"✅ {ticker}: Alert sent ({curr_signal})")
+        else:
+            print(f"{ticker}: No signal/regime change ({curr_signal}, Regime {curr_regime})")
+
+        summary.append({
+            'Ticker': ticker,
+            'BuyHoldReturn': round(cumM, 4),
+            'HMMReturn': round(cumH, 4),
+            'Ratio': round(ratio, 4),
+            'ScalerType': scaler_type or 'hybrid',
+            'NumUsedStates': best_states if best_model else 0,
+            'PosRegimes': good_states if best_model else [],
+            'RegimeSharpeMap': sharpe.round(2).to_dict() if best_model else {},
+            'FallbackUsed': best_model is None
         })
-        print(f"✅ {ticker}: Alert sent ({curr_signal})")
-    else:
-        print(f"{ticker}: No signal/regime change ({curr_signal}, Regime {curr_regime})")
 
-    summary.append({
-        'Ticker': ticker,
-        'BuyHoldReturn': round(cumM, 4),
-        'HMMReturn': round(cumH, 4),
-        'Ratio': round(ratio, 4),
-        'ScalerType': scaler_type or 'hybrid',
-        'NumUsedStates': best_states if best_model else 0,
-        'PosRegimes': good_states if best_model else [],
-        'RegimeSharpeMap': sharpe.round(2).to_dict() if best_model else {},
-        'FallbackUsed': best_model is None
-    })
+    except Exception as e:
+        print(f"❌ Skipping {ticker} due to error: {e}")
 
 # ─── Save Backtest Summary ───────────────────────────────────────────────
 df_summary = pd.DataFrame(summary)
