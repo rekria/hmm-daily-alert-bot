@@ -136,7 +136,7 @@ for name, ticker in ASSETS.items():
     df['RSI'] = RSIIndicator(close_series).rsi()
     df['Volume_Z'] = ((df['Volume'] - df['Volume'].rolling(20).mean()) / df['Volume'].rolling(20).std()).fillna(0)
 
-    # ✅ Correct feature check & skip logic
+    # ✅ Robust feature check and drop
     missing = set(FEATURE_COLS) - set(df.columns)
     if missing:
         print(f"⚠️ Missing features for {ticker}: {missing}")
@@ -145,8 +145,12 @@ for name, ticker in ASSETS.items():
     if not valid_features:
         print(f"❌ Skipping {ticker} — no valid features available")
         continue
-
-    df.dropna(subset=valid_features, inplace=True)
+    else:
+        try:
+            df.dropna(subset=valid_features, inplace=True)
+        except KeyError as e:
+            print(f"❌ Skipping {ticker} — error dropping rows with missing features: {e}")
+            continue
 
     # ─── HMM Training & Signal Logic ───────────────────────────────
     best_model, best_bic, scaler_type, best_states = None, np.inf, None, 0
