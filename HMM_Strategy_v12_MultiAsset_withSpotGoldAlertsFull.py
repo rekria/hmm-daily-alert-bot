@@ -1,4 +1,4 @@
-# HMM Strategy v13: Robust Implementation with Data Validation and Model Improvements
+# HMM Strategy v13: Optimized Convergence Parameters
 import os
 import json
 import numpy as np
@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 import warnings
-import time  # Added for retry sleep
+import time
 from datetime import datetime, timedelta
 
 from hmmlearn.hmm import GaussianHMM
@@ -29,19 +29,19 @@ ASSETS = {
     'AAPL': 'AAPL', 'MSFT': 'MSFT', 'GOOGL': 'GOOGL', 'AMZN': 'AMZN', 'NVDA': 'NVDA',
     'META': 'META', 'NFLX': 'NFLX', 'ASML': 'ASML', 'TSM': 'TSM', 'BABA': 'BABA', 'BA': 'BA'
 }
-START_DATE = '2012-01-01'  # Extended history
-END_DATE = datetime.now().strftime('%Y-%m-%d')  # Explicit end date
-MIN_DATA_POINTS = 250      # Minimum data points required
-MAX_STATES = 5             # Reduced complexity
+START_DATE = '2012-01-01'
+END_DATE = datetime.now().strftime('%Y-%m-%d')
+MIN_DATA_POINTS = 250
+MAX_STATES = 5
 SHARPE_THRESHOLD = 0.1
 DURATION_THRESHOLD = 10
-ROLLING_HYBRID_WINDOW = 50 # Longer lookback for fallback
+ROLLING_HYBRID_WINDOW = 50
 LOOKBACK = 60
-UNIFORM_SIGNAL_THRESHOLD = 0.8  # 80% same signal triggers review
+UNIFORM_SIGNAL_THRESHOLD = 0.8
 
 FEATURE_COLS = [
     'LogReturn', 'MACD', 'MACD_diff', 'RSI', 'Volume_Z'
-]  # Removed problematic features
+]
 
 GCS_BUCKET = "my-hmm-state"
 SIGNAL_LOG_FILE = "signal_log.csv"
@@ -55,7 +55,6 @@ def download_last_signals(file_name='last_signal.json'):
         blob = bucket.blob(file_name)
         if blob.exists():
             content = blob.download_as_text()
-            # Ensure we always get a dictionary
             data = json.loads(content)
             if isinstance(data, dict):
                 return data
@@ -116,13 +115,11 @@ if not isinstance(last_signals, dict):
     print("⚠️ Resetting last_signals to empty dictionary")
     last_signals = {}
 summary = []
-signal_counter = {'BUY': 0, 'SELL': 0}  # Track signal distribution
+signal_counter = {'BUY': 0, 'SELL': 0}
 
 # ─── Temporal Feature Processing ───
 def process_historical_vix(df):
-    """Process VIX data with proper temporal alignment"""
     try:
-        # Get VIX data with extended history
         vix_start = df.index.min() - timedelta(days=60)
         vix_end = df.index.max()
         vix = yf.download(
@@ -135,18 +132,15 @@ def process_historical_vix(df):
         )
         
         if not vix.empty:
-            # Simplify multi-index if needed
             if isinstance(vix.columns, pd.MultiIndex):
                 vix.columns = vix.columns.get_level_values(0)
                 
             vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
             
-            # Calculate rolling metrics using only past data
             vix_mean = vix_close.expanding(min_periods=1).mean()
             vix_std = vix_close.expanding(min_periods=1).std()
             vix_z = (vix_close - vix_mean) / vix_std
             
-            # Forward fill and backfill to handle missing values
             vix_z = vix_z.ffill().bfill()
             return vix_z.reindex(df.index).fillna(0)
     except Exception as e:
@@ -155,29 +149,25 @@ def process_historical_vix(df):
 
 # ─── Robust Data Download ───
 def download_asset_data(ticker, start_date, end_date, max_retries=3):
-    """Robust data download with retry mechanism"""
     for attempt in range(max_retries):
         try:
-            # Try using Ticker API which handles symbol changes better
             asset = yf.Ticker(ticker)
             df = asset.history(
                 start=start_date, 
                 end=end_date, 
-                auto_adjust=True,  # Get adjusted prices
-                actions=False,     # Exclude dividends/splits
+                auto_adjust=True,
+                actions=False,
                 timeout=30
             )
             
             if not df.empty:
-                # Ensure we have date index
                 df.index = pd.to_datetime(df.index)
                 return df
                 
         except Exception as e:
             print(f"⚠️ Attempt {attempt+1} failed for {ticker}: {str(e)}")
-            time.sleep(2)  # Wait before retrying
+            time.sleep(2)
     
-    # Fallback to direct download
     try:
         print(f"⚠️ Using fallback download for {ticker}")
         df = yf.download(
@@ -196,30 +186,45 @@ def download_asset_data(ticker, start_date, end_date, max_retries=3):
     
     return pd.DataFrame()
 
+# ─── Optimized HMM Training ───
+def train_hmm_model(X, n_states):
+    """Train HMM with optimized parameters for convergence"""
+    try:
+        model = GaussianHMM(
+            n_components=n_states,
+            covariance_type='diag',
+            n_iter=300,          # Reduced iterations but with better init
+            tol=1e-4,             # Slightly looser tolerance
+            init_params='stmc',    # Initialize: s=startprob, t=transmat, m=means, c=covars
+            random_state=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(X)
+        return model
+    except Exception as e:
+        print(f"⚠️ HMM training failed: {str(e)}")
+    return None
+
 # ─── Processing Loop ───
 for name, ticker in ASSETS.items():
     print(f"\n🔍 Processing: {ticker}")
     try:
-        # Download price data with robust method
+        # Download price data
         df = download_asset_data(ticker, START_DATE, END_DATE)
         
-        # Check if we got valid data
         if df.empty:
             print(f"⚠️ {ticker}: No data downloaded")
             continue
             
-        # Simplify multi-index columns to single level
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         
-        # Check data sufficiency
         if len(df) < MIN_DATA_POINTS:
             print(f"⚠️ {ticker}: Insufficient data ({len(df)} < {MIN_DATA_POINTS})")
-            print(f"First date: {df.index.min()}, Last date: {df.index.max()}")
             continue
             
-        # Ensure we have a valid price column
-        price_col = 'Close'  # Since we used auto_adjust=True
+        price_col = 'Close'
         if price_col not in df.columns:
             print(f"⚠️ {ticker}: No price column found")
             continue
@@ -228,11 +233,9 @@ for name, ticker in ASSETS.items():
         df['LogReturn'] = np.log(df['Price']).diff()
         df.dropna(subset=['LogReturn'], inplace=True)
         
-        # Temporal VIX processing
         df['VIX'] = process_historical_vix(df)
         
         # ─── Technical Indicators ───
-        # MACD
         try:
             macd_calc = MACD(df['Price'])
             df['MACD'] = macd_calc.macd().ffill().bfill().fillna(0)
@@ -241,14 +244,12 @@ for name, ticker in ASSETS.items():
             df['MACD'] = 0.0
             df['MACD_diff'] = 0.0
         
-        # RSI
         try:
             rsi_calc = RSIIndicator(df['Price'])
             df['RSI'] = rsi_calc.rsi().ffill().bfill().fillna(50)
         except Exception:
-            df['RSI'] = 50.0  # Neutral value
+            df['RSI'] = 50.0
         
-        # Volume Z-Score
         try:
             vol_mean = df['Volume'].expanding(min_periods=1).mean()
             vol_std = df['Volume'].expanding(min_periods=1).std()
@@ -256,16 +257,13 @@ for name, ticker in ASSETS.items():
         except Exception:
             df['Volume_Z'] = 0.0
 
-        # Ensure all required features exist
         for col in FEATURE_COLS:
             if col not in df.columns:
                 df[col] = 0.0
 
-        # Fill any remaining NA values
         df.fillna(0, inplace=True)
         
-        # Use only recent data for modeling (with copy to avoid warnings)
-        modeling_df = df.iloc[-LOOKBACK:].copy() if len(df) > LOOKBACK else df.copy()
+        modeling_df = df.iloc[-LOOKBACK:].copy()
         
         # ─── HMM Model ───
         best_model, best_bic, best_states = None, np.inf, 0
@@ -274,25 +272,18 @@ for name, ticker in ASSETS.items():
         if not state_range:
             state_range = [2]
             
+        # Prepare features once
+        X = modeling_df[FEATURE_COLS].values
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+            
         for n_states in state_range:
             try:
-                # Prepare features
-                X = modeling_df[FEATURE_COLS].values
-                scaler = StandardScaler()
-                X_scaled = scaler.fit_transform(X)
+                model = train_hmm_model(X_scaled, n_states)
+                if model is None:
+                    continue
                 
-                model = GaussianHMM(
-                    n_components=n_states,
-                    covariance_type='diag',
-                    n_iter=500,  # Increased iterations for convergence
-                    tol=1e-6,    # Tighter tolerance
-                    random_state=42
-                )
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    model.fit(X_scaled)
-                
-                # Calculate BIC with proper parameter count
+                # Calculate BIC
                 n_features = len(FEATURE_COLS)
                 n_params = n_states * (n_states - 1) + 2 * n_states * n_features
                 bic = -2 * model.score(X_scaled) + n_params * np.log(len(X_scaled))
@@ -305,21 +296,15 @@ for name, ticker in ASSETS.items():
 
         # ─── Position Determination ───
         if best_model is None:
-            # Robust fallback strategy
             momentum = modeling_df['LogReturn'].rolling(
                 ROLLING_HYBRID_WINDOW, min_periods=1).mean()
             modeling_df['Position'] = (momentum > 0).astype(int)
             print(f"⚠️ Using fallback strategy for {ticker}")
             regime_seq = [-1, -1]
             good_states = []
-            sharpe = pd.Series()
         else:
-            # Predict with best model
-            X = modeling_df[FEATURE_COLS].values
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
             hidden = best_model.predict(X_scaled)
-            modeling_df['HiddenState'] = hidden  # Safe on copy
+            modeling_df['HiddenState'] = hidden
             
             # Calculate regime performance
             try:
@@ -332,17 +317,15 @@ for name, ticker in ASSETS.items():
                     (durations > DURATION_THRESHOLD)
                 ].index.tolist()
             except Exception:
-                sharpe = pd.Series()
                 good_states = []
             
-            # Create position vector
             modeling_df['Position'] = modeling_df['HiddenState'].isin(good_states).astype(int)
             regime_seq = modeling_df['HiddenState'].iloc[-2:].values.tolist() if len(modeling_df) >= 2 else [-1, -1]
 
-        # Merge position back to main df
+        # Merge position back
         df = df.join(modeling_df[['Position']], how='left')
         df['Position'].ffill(inplace=True)
-        df['Position'].fillna(1, inplace=True)  # Default to buy
+        df['Position'].fillna(1, inplace=True)
 
         # ─── Signal Generation ───
         current_signal = "BUY" if df['Position'].iloc[-1] else "SELL"
@@ -351,13 +334,11 @@ for name, ticker in ASSETS.items():
         prev_regime = regime_seq[0] if len(regime_seq) > 1 else None
         price = df['Price'].iloc[-1]
         
-        # Track signal distribution
         signal_counter[current_signal] += 1
 
-        # Robust signal checking
         last_data = last_signals.get(ticker, {})
-        last_signal = last_data.get("signal") if isinstance(last_data, dict) else None
-        last_regime = last_data.get("regime", -999) if isinstance(last_data, dict) else -999
+        last_signal = last_data.get("signal", "")
+        last_regime = last_data.get("regime", -999)
 
         # ─── Telegram Alert ───
         msg = (
@@ -375,7 +356,6 @@ for name, ticker in ASSETS.items():
             except Exception as e:
                 print(f"⚠️ Failed to send Telegram alert for {ticker}: {str(e)}")
             
-            # Update last signals
             last_signals[ticker] = {"signal": current_signal, "regime": curr_regime}
             upload_last_signals(last_signals)
             
@@ -418,8 +398,8 @@ if total_assets > 0:
         dominant_signal = 'BUY' if signal_counter['BUY'] > signal_counter['SELL'] else 'SELL'
         warning_msg = (
             f"⚠️ MARKET WARNING: {uniform_ratio:.0%} assets show {dominant_signal} signals\n"
-            f"This may indicate systemic market conditions rather than asset-specific signals\n"
-            f"Recommend additional fundamental analysis before taking positions"
+            f"This may indicate systemic market conditions\n"
+            f"Recommend fundamental analysis confirmation"
         )
         try:
             requests.post(BASE_URL, json={"chat_id": CHAT_ID, "text": warning_msg}, timeout=10)
