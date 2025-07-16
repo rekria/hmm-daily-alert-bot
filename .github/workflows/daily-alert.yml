@@ -2,52 +2,58 @@ name: HMM Daily Alert
 
 on:
   schedule:
-    # switch to '0 0 * * *' for daily at 00:00 UTC → 08:00 SGT or '0 21 * * 1-5 for Tuesday to Saturday at 05:00 SGT
-    - cron: '0 21 * * 1-5'
+    - cron: '0 21 * * 1-5'  # 05:00 SGT weekdays
   workflow_dispatch:
 
 jobs:
   run-alert:
-    runs-on: ubuntu-latest
+    runs-on: [ubuntu-latest, self-hosted]
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
+      - name: Install TA-Lib dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+          tar -xvzf ta-lib-0.4.0-src.tar.gz
+          cd ta-lib/
+          ./configure --prefix=/usr
+          make
+          sudo make install
+        if: runner.os == 'Linux'
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance hmmlearn pandas numpy scikit-learn ta \
-                      feedparser nltk beautifulsoup4 requests \
-                      joblib matplotlib google-cloud-storage
+          pip install -r requirements.txt
 
       - name: Download NLTK data
-        run: |
-          python - <<EOF
-          import nltk
-          nltk.download('vader_lexicon')
-          EOF
+        run: python -c "import nltk; nltk.download('vader_lexicon')"
 
       - name: Export GCP Service Account JSON
         run: |
-          # decode the Base64 secret into the JSON file
           echo "${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}" \
             | base64 --decode > /tmp/gcp-key.json
-        shell: bash
-
-      - name: Validate GCP JSON (first line)
-        run: |
-          head -n 1 /tmp/gcp-key.json
-        shell: bash
 
       - name: Run bot
-        run: python HMM_Strategy_v12_MultiAsset_withSpotGoldAlertsFull.py
+        run: python HMM_Strategy_v14_Enhanced_Profitability.py
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID:   ${{ secrets.CHAT_ID }}
-          # point Google SDK at our decoded key
+          CHAT_ID: ${{ secrets.CHAT_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp-key.json
 
