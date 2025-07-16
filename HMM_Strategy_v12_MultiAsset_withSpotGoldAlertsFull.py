@@ -1,4 +1,4 @@
-# HMM Strategy v13: Suppressed Convergence Warnings
+# HMM Strategy v14: Enhanced Profitability
 import os
 import json
 import numpy as np
@@ -12,10 +12,9 @@ from datetime import datetime, timedelta
 from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
 from ta.trend import MACD
-from ta.momentum import RSIIndicator
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands, AverageTrueRange
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-import feedparser
-from bs4 import BeautifulSoup
 from google.cloud import storage
 
 # Suppress all warnings
@@ -31,14 +30,20 @@ START_DATE = '2012-01-01'
 END_DATE = datetime.now().strftime('%Y-%m-%d')
 MIN_DATA_POINTS = 250
 MAX_STATES = 5
-SHARPE_THRESHOLD = 0.1
 DURATION_THRESHOLD = 10
 ROLLING_HYBRID_WINDOW = 50
-LOOKBACK = 60
 UNIFORM_SIGNAL_THRESHOLD = 0.8
+SPY_CORR_THRESHOLD = 0.7
 
+# Sector-specific thresholds
+TECH_TICKERS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'NFLX', 'ASML', 'TSM']
+COMMODITY_TICKERS = ['GC=F']
+FINANCIAL_TICKERS = ['D05.SI']
+
+# Enhanced features
 FEATURE_COLS = [
-    'LogReturn', 'MACD', 'MACD_diff', 'RSI', 'Volume_Z'
+    'LogReturn', 'MACD', 'MACD_diff', 'RSI', 'Volume_Z', 
+    'BB_Width', 'ATR', 'Stochastic', 'VIX_Z'
 ]
 
 GCS_BUCKET = "my-hmm-state"
@@ -105,10 +110,10 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 # ─── Init ───
 sia = SentimentIntensityAnalyzer()
-last_signals = download_last_signals() or {}  # Ensure it's always a dictionary
+last_signals = download_last_signals() or {}
 summary = []
-signal_counter = {'BUY': 0, 'SELL': 0}
-signals_updated = False  # Track if any signals changed
+signal_counter = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
+signals_updated = False
 
 # ─── Temporal Feature Processing ───
 def process_historical_vix(df):
@@ -129,13 +134,7 @@ def process_historical_vix(df):
                 vix.columns = vix.columns.get_level_values(0)
                 
             vix_close = vix['Close'] if 'Close' in vix else vix.iloc[:, 0]
-            
-            vix_mean = vix_close.expanding(min_periods=1).mean()
-            vix_std = vix_close.expanding(min_periods=1).std()
-            vix_z = (vix_close - vix_mean) / vix_std
-            
-            vix_z = vix_z.ffill().bfill()
-            return vix_z.reindex(df.index).fillna(0)
+            return vix_close.reindex(df.index).ffill().bfill().fillna(0)
     except Exception:
         return pd.Series(0, index=df.index)
 
@@ -182,8 +181,8 @@ def train_hmm_model(X, n_states):
         model = GaussianHMM(
             n_components=n_states,
             covariance_type='diag',
-            n_iter=100,            # Reduced iterations
-            tol=0.1,                # Very loose tolerance
+            n_iter=100,
+            tol=0.1,
             init_params='stmc',
             random_state=42,
             verbose=False
@@ -216,9 +215,22 @@ for name, ticker in ASSETS.items():
         df['LogReturn'] = np.log(df['Price']).diff()
         df.dropna(subset=['LogReturn'], inplace=True)
         
-        df['VIX'] = process_historical_vix(df)
+        # Add overnight gap feature
+        df['Overnight'] = np.log(df['Open'] / df['Close'].shift(1))
+        df['Gap_Size'] = df['Overnight'].abs()
         
-        # ─── Technical Indicators ───
+        # Calculate volatility for dynamic lookback
+        volatility = df['LogReturn'].std() * np.sqrt(252)  # Annualized vol
+        if volatility > 0.3:   LOOKBACK = 90
+        elif volatility < 0.15: LOOKBACK = 30
+        else:                  LOOKBACK = 60
+        
+        # VIX processing
+        vix_series = process_historical_vix(df)
+        df['VIX'] = vix_series
+        df['VIX_Z'] = (vix_series - vix_series.mean()) / vix_series.std() if vix_series.std() > 0 else 0
+        
+        # ─── Enhanced Technical Indicators ───
         try:
             macd_calc = MACD(df['Price'])
             df['MACD'] = macd_calc.macd().ffill().bfill().fillna(0)
@@ -239,12 +251,48 @@ for name, ticker in ASSETS.items():
             df['Volume_Z'] = ((df['Volume'] - vol_mean) / vol_std).fillna(0)
         except Exception:
             df['Volume_Z'] = 0.0
+            
+        try:
+            # Bollinger Bands Width
+            bb = BollingerBands(df['Price'])
+            df['BB_Width'] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
+            df['BB_Width'].fillna(0, inplace=True)
+            
+            # Average True Range
+            atr = AverageTrueRange(df['High'], df['Low'], df['Close'], window=14)
+            df['ATR'] = atr.average_true_range().fillna(0)
+            
+            # Stochastic Oscillator
+            stoch = StochasticOscillator(df['High'], df['Low'], df['Close'], window=14)
+            df['Stochastic'] = stoch.stoch().fillna(50)
+        except Exception:
+            df['BB_Width'] = 0.0
+            df['ATR'] = 0.0
+            df['Stochastic'] = 50.0
 
+        # Ensure all features exist
         for col in FEATURE_COLS:
             if col not in df.columns:
                 df[col] = 0.0
 
         df.fillna(0, inplace=True)
+        
+        # Correlation filter (reduce exposure to SPY-correlated assets)
+        position_adjustment = 1.0
+        if ticker != 'SPY':
+            spy_data = download_asset_data('SPY', START_DATE, END_DATE)
+            if not spy_data.empty and not df.empty:
+                spy_returns = spy_data['Close'].pct_change().dropna()
+                asset_returns = df['Price'].pct_change().dropna()
+                
+                # Align indices
+                common_index = spy_returns.index.intersection(asset_returns.index)
+                if len(common_index) > 10:  # Minimum data points
+                    correlation = pd.Series(spy_returns.loc[common_index]).corr(
+                        pd.Series(asset_returns.loc[common_index])
+                    
+                    if abs(correlation) > SPY_CORR_THRESHOLD:
+                        position_adjustment = 0.7  # Reduce exposure
         
         modeling_df = df.iloc[-LOOKBACK:].copy()
         
@@ -255,7 +303,7 @@ for name, ticker in ASSETS.items():
         if not state_range:
             state_range = [2]
             
-        # Prepare features once
+        # Prepare features
         X = modeling_df[FEATURE_COLS].values
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
@@ -284,47 +332,104 @@ for name, ticker in ASSETS.items():
             hidden = best_model.predict(X_scaled)
             modeling_df['HiddenState'] = hidden
             
-            # Calculate regime performance
+            # Set sector-specific Sharpe threshold
+            if ticker in TECH_TICKERS:
+                sharpe_threshold = 0.15
+            elif ticker in COMMODITY_TICKERS + FINANCIAL_TICKERS:
+                sharpe_threshold = 0.05
+            else:
+                sharpe_threshold = 0.1
+            
+            # Enhanced regime selection
             try:
-                returns = modeling_df.groupby('HiddenState')['LogReturn']
-                sharpe = returns.mean() / returns.std()
-                durations = modeling_df.groupby('HiddenState').size()
+                state_returns = modeling_df.groupby('HiddenState')['LogReturn']
+                state_durations = modeling_df.groupby('HiddenState').size()
                 
-                good_states = sharpe[
-                    (sharpe > SHARPE_THRESHOLD) & 
-                    (durations > DURATION_THRESHOLD)
-                ].index.tolist()
+                # More sophisticated regime scoring
+                regime_scores = []
+                for state in state_returns.groups:
+                    returns = state_returns.get_group(state)
+                    score = (returns.mean() * 3) - returns.std()  # Reward return, penalize volatility
+                    regime_scores.append((state, score))
+                
+                # Sort by best score and select top regimes
+                regime_scores.sort(key=lambda x: x[1], reverse=True)
+                good_states = [state for state, score in regime_scores 
+                              if score > sharpe_threshold and 
+                              state_durations[state] > DURATION_THRESHOLD][:2]  # Max 2 best states
+                
+                # Probabilistic position sizing
+                probs = best_model.predict_proba(X_scaled)[-1]
+                position_strength = sum(probs[state] for state in good_states if state < len(probs))
+                modeling_df['Position'] = position_strength
+                
             except Exception:
                 good_states = []
+                modeling_df['Position'] = 1.0  # Default to full position
             
-            modeling_df['Position'] = modeling_df['HiddenState'].isin(good_states).astype(int)
             regime_seq = modeling_df['HiddenState'].iloc[-2:].values.tolist() if len(modeling_df) >= 2 else [-1, -1]
 
+        # Risk management: Drawdown protection
+        modeling_df['TrailingMax'] = modeling_df['Price'].cummax()
+        modeling_df['Drawdown'] = (modeling_df['Price'] - modeling_df['TrailingMax']) / modeling_df['TrailingMax']
+        modeling_df.loc[modeling_df['Drawdown'] < -0.08, 'Position'] *= 0.5
+        modeling_df.loc[modeling_df['Drawdown'] < -0.15, 'Position'] = 0
+        
+        # Apply gap protection
+        modeling_df.loc[modeling_df['Gap_Size'] > 0.03, 'Position'] *= 0.7
+        
+        # Apply volatility-based position sizing
+        asset_volatility = modeling_df['LogReturn'].std() * np.sqrt(252)
+        if asset_volatility > 0.25:
+            modeling_df['Position'] *= 0.8
+        elif asset_volatility < 0.15:
+            modeling_df['Position'] *= 1.2
+        modeling_df['Position'] = np.clip(modeling_df['Position'], 0, 1.5)  # Cap at 150%
+        
+        # Apply correlation adjustment
+        modeling_df['Position'] *= position_adjustment
+        
+        # Hybrid momentum integration
+        mom_strength = RSIIndicator(modeling_df['Price']).rsi() / 50  # 0-2 scale
+        modeling_df['Position'] = (modeling_df['Position'] * 0.7) + (mom_strength * 0.3)
+        modeling_df['Position'] = np.clip(modeling_df['Position'], 0, 1.5)  # Final clip
+        
         # Merge position back
         df = df.join(modeling_df[['Position']], how='left')
         df['Position'].ffill(inplace=True)
         df['Position'].fillna(1, inplace=True)
 
         # ─── Signal Generation ───
-        current_signal = "BUY" if df['Position'].iloc[-1] else "SELL"
-        prev_signal = "BUY" if df['Position'].iloc[-2] else "SELL" if len(df) >= 2 else "N/A"
+        current_position = df['Position'].iloc[-1]
+        current_signal = "BUY" if current_position > 0.7 else "SELL" if current_position < 0.3 else "HOLD"
+        prev_position = df['Position'].iloc[-2] if len(df) >= 2 else current_position
+        prev_signal = "BUY" if prev_position > 0.7 else "SELL" if prev_position < 0.3 else "HOLD"
+        
         curr_regime = regime_seq[-1] if regime_seq else None
         prev_regime = regime_seq[0] if len(regime_seq) > 1 else None
         price = df['Price'].iloc[-1]
         
-        signal_counter[current_signal] += 1
+        # Count signals
+        if current_signal == "BUY":
+            signal_counter['BUY'] += 1
+        elif current_signal == "SELL":
+            signal_counter['SELL'] += 1
+        else:
+            signal_counter['HOLD'] += 1
 
         last_data = last_signals.get(ticker, {})
         last_signal = last_data.get("signal", "")
-        last_regime = last_data.get("regime", -999)  # Unique default value
+        last_regime = last_data.get("regime", -999)
 
         # ─── Telegram Alert ───
         msg = (
-            f"📊 HMM v13 — {ticker}\n"
+            f"📊 HMM v14 — {ticker}\n"
             f"Regime: {prev_regime} → {curr_regime}\n"
             f"Signal: {prev_signal} → {current_signal}\n"
+            f"Position: {current_position:.0%}\n"
             f"Price: ${price:.2f}\n"
-            f"States: {best_states}"
+            f"States: {best_states}\n"
+            f"Volatility: {asset_volatility:.1%}"
         )
 
         if last_signal != current_signal or last_regime != curr_regime:
@@ -333,18 +438,19 @@ for name, ticker in ASSETS.items():
             except Exception:
                 pass
             
-            # Update in-memory state
             last_signals[ticker] = {"signal": current_signal, "regime": curr_regime}
-            signals_updated = True  # Mark for final save
+            signals_updated = True
             
             append_signal_log({
                 "Date": datetime.now().strftime("%Y-%m-%d"),
                 "Ticker": ticker,
                 "Signal": current_signal,
+                "Position": round(current_position, 2),
                 "Regime": curr_regime,
                 "Price": round(price, 2),
                 "PrevSignal": prev_signal,
-                "PrevRegime": prev_regime
+                "PrevRegime": prev_regime,
+                "Volatility": round(asset_volatility, 4)
             })
 
         # ─── Performance Calculation ───
@@ -360,7 +466,12 @@ for name, ticker in ASSETS.items():
             'HMMReturn': round(cumH, 4),
             'Ratio': round(ratio, 4),
             'NumUsedStates': best_states,
-            'FallbackUsed': best_model is None
+            'FallbackUsed': best_model is None,
+            'FinalPosition': round(current_position, 2),
+            'Volatility': round(asset_volatility, 4),
+            'Sector': "Tech" if ticker in TECH_TICKERS else 
+                     "Commodity" if ticker in COMMODITY_TICKERS else 
+                     "Financial" if ticker in FINANCIAL_TICKERS else "Other"
         })
 
     except Exception as e:
@@ -373,11 +484,11 @@ if signals_updated:
 # ─── Uniform Signal Check ───
 total_assets = len(summary)
 if total_assets > 0:
-    max_signal = max(signal_counter.values())
+    max_signal = max(signal_counter.get('BUY', 0), signal_counter.get('SELL', 0))
     uniform_ratio = max_signal / total_assets
     
     if uniform_ratio >= UNIFORM_SIGNAL_THRESHOLD:
-        dominant_signal = 'BUY' if signal_counter['BUY'] > signal_counter['SELL'] else 'SELL'
+        dominant_signal = 'BUY' if signal_counter.get('BUY', 0) > signal_counter.get('SELL', 0) else 'SELL'
         warning_msg = (
             f"⚠️ MARKET WARNING: {uniform_ratio:.0%} assets show {dominant_signal} signals\n"
             f"This may indicate systemic market conditions"
