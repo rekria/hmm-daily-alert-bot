@@ -105,11 +105,10 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 # ─── Init ───
 sia = SentimentIntensityAnalyzer()
-last_signals = download_last_signals()
-if not isinstance(last_signals, dict):
-    last_signals = {}
+last_signals = download_last_signals() or {}  # Ensure it's always a dictionary
 summary = []
 signal_counter = {'BUY': 0, 'SELL': 0}
+signals_updated = False  # Track if any signals changed
 
 # ─── Temporal Feature Processing ───
 def process_historical_vix(df):
@@ -317,7 +316,7 @@ for name, ticker in ASSETS.items():
 
         last_data = last_signals.get(ticker, {})
         last_signal = last_data.get("signal", "")
-        last_regime = last_data.get("regime", -999)
+        last_regime = last_data.get("regime", -999)  # Unique default value
 
         # ─── Telegram Alert ───
         msg = (
@@ -334,8 +333,9 @@ for name, ticker in ASSETS.items():
             except Exception:
                 pass
             
+            # Update in-memory state
             last_signals[ticker] = {"signal": current_signal, "regime": curr_regime}
-            upload_last_signals(last_signals)
+            signals_updated = True  # Mark for final save
             
             append_signal_log({
                 "Date": datetime.now().strftime("%Y-%m-%d"),
@@ -363,8 +363,12 @@ for name, ticker in ASSETS.items():
             'FallbackUsed': best_model is None
         })
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error processing {ticker}: {str(e)}")
+
+# ─── Save FINAL state if any changes occurred ───
+if signals_updated:
+    upload_last_signals(last_signals)
 
 # ─── Uniform Signal Check ───
 total_assets = len(summary)
