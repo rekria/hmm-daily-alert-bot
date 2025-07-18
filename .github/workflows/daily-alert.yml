@@ -2,7 +2,7 @@ name: HMM Daily Alert
 
 on:
   schedule:
-    - cron: '0 21 * * 1-5'  # 05:00 SGT weekdays
+   # - cron: '0 21 * * 1-5'  # 05:00 SGT weekdays
   workflow_dispatch:
 
 jobs:
