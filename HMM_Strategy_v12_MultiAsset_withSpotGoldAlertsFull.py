@@ -289,7 +289,7 @@ for name, ticker in ASSETS.items():
                 common_index = spy_returns.index.intersection(asset_returns.index)
                 if len(common_index) > 10:  # Minimum data points
                     correlation = pd.Series(spy_returns.loc[common_index]).corr(
-                        pd.Series(asset_returns.loc[common_index])
+                        pd.Series(asset_returns.loc[common_index]))
                     
                     if abs(correlation) > SPY_CORR_THRESHOLD:
                         position_adjustment = 0.7  # Reduce exposure
